@@ -1,0 +1,41 @@
+{
+	"name": "scoutid-keycloak-admin",
+	"version": "0.1.0",
+	"description": "Simplified admin GUI for managing ScoutID OAuth clients in Keycloak",
+	"repository": {
+		"type": "git",
+		"url": "git://github.com/Scouterna/scoutid-keycloak-admin.git"
+	},
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "tsc && vite build",
+		"preview": "vite preview",
+		"lint": "biome check",
+		"format": "biome check --write"
+	},
+	"license": "MIT",
+	"dependencies": {
+		"@fontsource-variable/source-sans-3": "^5.2.9",
+		"@scouterna/ui-react": "^4.3.7",
+		"@scouterna/ui-webc": "^4.3.7",
+		"@tailwindcss/vite": "^4.2.1",
+		"oidc-client-ts": "^3.1.0",
+		"react": "^19.2.3",
+		"react-dom": "^19.2.3",
+		"tailwindcss": "^4.2.1"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.8",
+		"@scouterna/tailwind-theme": "^0.0.5",
+		"@types/react": "^19.2.7",
+		"@types/react-dom": "^19.2.3",
+		"@vitejs/plugin-react": "^5.1.2",
+		"typescript": "^5.9.3",
+		"vite": "^7.2.7"
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"packageManager": "pnpm@10.25.0"
+}
