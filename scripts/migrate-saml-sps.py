@@ -22,10 +22,10 @@ import sys
 from collections import Counter
 from typing import Any
 
-# The attribute set is near-identical across the estate, so the mappers belong
-# on a shared client scope rather than being duplicated onto every client.
-# Recorded here for the scope definition; the per-client output references the
-# scope by name instead.
+# The attribute set the legacy IdP released, near-identical across the estate.
+# Reported for information only: this script does NOT create a client scope, and
+# no such scope exists yet. How attribute release should actually be configured
+# is decided in scoutid-keycloak-provider (docs/client_config_guide.md).
 SCOUTID_SAML_ATTRIBUTES = [
     "uid",
     "email",
@@ -41,7 +41,6 @@ SCOUTID_SAML_ATTRIBUTES = [
     "roles",
 ]
 
-SCOUTID_SAML_SCOPE = "scoutid-saml-attributes"
 
 
 class SkipReason(Exception):
@@ -110,7 +109,6 @@ def map_sp(entity_id: str, data: dict) -> dict:
         "redirectUris": [acs],
         "adminUrl": acs,
         "attributes": attributes,
-        "defaultClientScopes": [SCOUTID_SAML_SCOPE],
     }
 
 
@@ -184,11 +182,7 @@ def main() -> int:
 
     if args.out:
         payload = {
-            "clientScope": {
-                "name": SCOUTID_SAML_SCOPE,
-                "protocol": "saml",
-                "attributes": SCOUTID_SAML_ATTRIBUTES,
-            },
+            "legacyAttributesForReference": SCOUTID_SAML_ATTRIBUTES,
             "clients": clients,
         }
         with open(args.out, "w", encoding="utf-8") as handle:

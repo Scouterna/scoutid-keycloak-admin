@@ -17,8 +17,18 @@ export interface KcClient {
 	redirectUris?: string[];
 	webOrigins?: string[];
 	adminUrl?: string;
+	rootUrl?: string;
 	defaultClientScopes?: string[];
 	attributes?: Record<string, string>;
+	protocolMappers?: KcProtocolMapper[];
+}
+
+/** A claim mapper created together with the client, on its dedicated scope. */
+export interface KcProtocolMapper {
+	name: string;
+	protocol: string;
+	protocolMapper: string;
+	config: Record<string, string>;
 }
 
 export class ApiError extends Error {

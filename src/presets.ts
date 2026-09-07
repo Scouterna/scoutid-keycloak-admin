@@ -11,6 +11,7 @@ import type { KcClient } from "./api";
  * must be creatable.
  */
 export type PresetId =
+	| "google-workspace"
 	| "karwebb"
 	| "saml-generic"
 	| "webapp"
@@ -33,14 +34,6 @@ const SCOUTID_OIDC_SCOPES = ["profile", "email", "phone"];
  */
 export const MEMBERSHIP_SCOPE = "scoutnet-memberships";
 
-/**
- * SAML clients get the same attribute set the legacy IdP released. It is
- * identical across essentially the whole estate, so it lives on a shared client
- * scope rather than being duplicated per client. Created by
- * scripts/migrate-saml-sps.py.
- */
-const SCOUTID_SAML_SCOPE = "scoutid-saml-attributes";
-
 export interface Preset {
 	id: PresetId;
 	label: string;
@@ -48,6 +41,8 @@ export interface Preset {
 	protocol: "openid-connect" | "saml";
 	/** Whether the form should ask for a domain and expand it. */
 	needsDomain: boolean;
+	/** Whether the form should ask for the kår's Scoutnet id (e.g. 766). */
+	needsKarId?: boolean;
 	/**
 	 * Endpoint the preset derives from the domain, shown in the form so the
 	 * admin can correct it before saving. Empty when the preset takes no domain.
@@ -61,6 +56,7 @@ export interface Preset {
 		domain: string;
 		endpoint: string;
 		memberships: boolean;
+		karId: string;
 	}): Partial<KcClient>;
 }
 
@@ -118,9 +114,11 @@ const samlClient = (
 	protocol: "saml",
 	enabled: true,
 	frontchannelLogout: true,
+	// No client scopes are set: attribute release for SAML clients is not
+	// configured by this GUI. See docs/client_config_guide.md in
+	// scoutid-keycloak-provider for how clients should be set up.
 	redirectUris: [acs],
 	adminUrl: acs,
-	defaultClientScopes: [SCOUTID_SAML_SCOPE],
 	attributes: {
 		saml_name_id_format: "email",
 		saml_assertion_consumer_url_post: acs,
@@ -137,6 +135,52 @@ const samlClient = (
 });
 
 export const presets: Preset[] = [
+	{
+		id: "google-workspace",
+		label: "Google Workspace (OIDC)",
+		description:
+			"SSO för en kårs Google Workspace. Följer client_config_guide.md i scoutid-keycloak-provider.",
+		protocol: "openid-connect",
+		needsDomain: false,
+		needsKarId: true,
+		membershipsByDefault: false,
+		build: ({ clientId, name, karId }) => ({
+			clientId,
+			name: name || clientId,
+			protocol: "openid-connect",
+			enabled: true,
+			publicClient: false,
+			standardFlowEnabled: true,
+			serviceAccountsEnabled: false,
+			rootUrl: "https://accounts.google.com",
+			// Google issues the redirect URI only once the SSO profile exists, so
+			// it is pasted in afterwards on the client's page.
+			redirectUris: [],
+			// Deliberately no `email` scope: the built-in one would emit an `email`
+			// claim from the user's personal address, colliding with the mapper
+			// below that must supply the Workspace address instead.
+			defaultClientScopes: ["profile"],
+			protocolMappers: [
+				{
+					// The access restriction: group_email_<karId> exists only for
+					// members of that kår (ScoutnetProfileSync sets it from the
+					// group's `domain` attribute). A non-member gets no email claim,
+					// so Google cannot match them to an account.
+					name: "group_email_mapper",
+					protocol: "openid-connect",
+					protocolMapper: "oidc-usermodel-attribute-mapper",
+					config: {
+						"user.attribute": `group_email_${karId}`,
+						"claim.name": "email",
+						"jsonType.label": "String",
+						"id.token.claim": "true",
+						"userinfo.token.claim": "true",
+						"lightweight.claim": "true",
+					},
+				},
+			],
+		}),
+	},
 	{
 		id: "karwebb",
 		label: "Kårwebb (SAML)",

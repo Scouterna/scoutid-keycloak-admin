@@ -18,69 +18,50 @@ application, where admins registered SAML Service Providers by domain.
 
 **Status: demo.** Read/create/edit of clients only.
 
-## SAML and OIDC
+> [!IMPORTANT]
+> **How ScoutID clients should be configured is documented in
+> [`docs/client_config_guide.md`](https://github.com/Scouterna/scoutid-keycloak-provider/blob/main/docs/client_config_guide.md)
+> in `scoutid-keycloak-provider`.** That guide is the authority — it covers
+> Google Workspace, Microsoft 365, Joomla, Photoprism and a standard OIDC
+> recipe, plus the available ScoutID scopes and claims. This README documents
+> *this application*, not how to integrate services with ScoutID. Where the two
+> disagree, the guide is right.
 
-The existing ScoutID estate is overwhelmingly SAML: the great majority of
-integrations are SAML service providers — nearly all of them kårwebbar — against
-a handful of OIDC clients.
+## Presets
 
-So the GUI creates both protocols. The Kårwebb preset produces a **SAML** client,
-because that is what kårwebbar are today; the OIDC presets exist for new
-integrations.
+The GUI's value over the generic Keycloak console is that it asks for a couple
+of fields and expands them into a complete client, instead of requiring the
+right answers in ~40 console fields. Presets live in
+[`src/presets.ts`](src/presets.ts), and the create form shows the exact JSON
+that will be sent before you submit.
 
-Two details from the legacy data drive the presets:
+- **Google Workspace (OIDC)** — follows the provider guide's Google Workspace
+  section: confidential client named `<kårid>-google-workspace`, root URL
+  `https://accounts.google.com`, and a mapper from `group_email_<kårid>` to the
+  `email` claim. Two steps stay manual and the form says so: setting the
+  `domain` attribute on the kår's Keycloak group, and pasting back the redirect
+  URI that Google issues once the SSO profile exists.
+- **OIDC web app / SPA / backend service** — the generic shapes from the
+  guide's *Standard OIDC* section.
+- **SAML (kårwebb and generic)** — for the legacy integration shape. The
+  existing estate is SAML today, but new integrations are expected to be OIDC;
+  see the guide. These presets set endpoints and flow flags only — they do not
+  configure attribute release.
 
-- **ACS URL is `https://<domain>/wp-login.php`** for almost every kårwebb.
-  Sites serving WordPress from a `/wp` subdirectory use `/wp/wp-login.php`, so
-  the field is derived from the domain but stays editable.
-- **Each site has two entities** (`<domain>` and `<domain>/wp`), covering both
-  layouts — roughly half the estate uses the subdirectory form, so a migration
-  that assumes one client per site will miss a large share of it. The
-  subdirectory is part of the SAML entity ID, so the domain field keeps it:
-  pasting `www.example.se/wp/wp-admin/` yields entity ID `www.example.se/wp` and
-  ACS `https://www.example.se/wp/wp-login.php`.
+## Legacy migration helper
 
-Confirmed against a live kårwebb login (HAR capture): WordPress uses the
-**WP SAML Auth** plugin (`wp-login.php?action=wp-saml-auth`), the SAMLRequest
-carries `Issuer=<host>/wp`, and the IdP POSTs the `SAMLResponse` back to
-`https://<host>/wp/wp-login.php`. No OAuth is involved anywhere in that flow.
+[`scripts/migrate-saml-sps.py`](scripts/migrate-saml-sps.py) reads a TSV export
+of the old SimpleSAMLphp `saml20_sp_remote` table and reports what a
+like-for-like mapping to Keycloak SAML clients would produce. **It is a dry run
+by default, writes nothing, and needs no credentials.**
 
-The released attribute set is identical across essentially the whole estate
-(`uid, email, firstname, lastname, firstlast, displayName, dob, group_name,
-group_no, group_id, above_15, roles`), so it belongs on a shared client scope
-(`scoutid-saml-attributes`) rather than being duplicated onto every client.
-
-## Bulk migration
-
-[`scripts/migrate-saml-sps.py`](scripts/migrate-saml-sps.py) maps the legacy
-`saml20_sp_remote` table onto Keycloak SAML clients. **It is a dry run by
-default and never writes to Keycloak or to the legacy database.**
-
-It takes a TSV export of the legacy `saml20_sp_remote` table, two columns —
-`entity_id` and `entity_data` — with tabs and newlines stripped from the data
-column. Producing that export is left to whoever has read access to the legacy
-database; the script itself needs no credentials.
+It is an analysis aid, not a migration plan: it reproduces the *legacy* shape,
+and how those services should actually be configured in the new ScoutID is
+decided in the provider guide.
 
 ```sh
 ./scripts/migrate-saml-sps.py sp_all.tsv --report
-./scripts/migrate-saml-sps.py sp_all.tsv --out clients.json
 ```
-
-Against a full export, all but a handful of rows map cleanly with no duplicate
-client IDs. The remainder are legacy junk rather than mapping failures — test
-entries, a wildcard entity, and rows whose `entity_data` is PHP-serialised
-rather than JSON. Each needs a human decision, so the script reports them
-instead of guessing.
-
-## Why not just the Keycloak console?
-
-Registering a client in the generic console means knowing which of ~40 fields
-matter and getting redirect URIs and scopes right by hand. This GUI asks for a
-*type* and a *domain*, then expands them into the correct redirect URIs, web
-origins and flow flags — the same idea as the old ScoutID admin, which turned a
-domain into a Service Provider. Presets live in
-[`src/presets.ts`](src/presets.ts) and the create form shows the exact JSON that
-will be sent before you submit.
 
 ## The `scoutnet-memberships` scope
 
@@ -103,8 +84,8 @@ Two reasons it is not on by default:
   `memberships` and `group_emails_json` claims grow with the number of groups
   and roles a person holds.
 
-SAML clients are unaffected: they release the legacy attribute set, which
-carries group and role data of its own.
+The scope's exact claims are listed in the provider guide's *Tillgängliga
+ScoutID-attribut* table.
 
 ## Architecture
 

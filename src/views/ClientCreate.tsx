@@ -18,6 +18,7 @@ export function ClientCreate() {
 	const [endpoint, setEndpoint] = useState("");
 	const [endpointTouched, setEndpointTouched] = useState(false);
 	const [memberships, setMemberships] = useState(false);
+	const [karId, setKarId] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 	const [secret, setSecret] = useState<string | null>(null);
@@ -43,6 +44,15 @@ export function ClientCreate() {
 		setClientId(normalizeDomain(domain));
 	}, [preset, domain, clientIdTouched]);
 
+	// Google Workspace clients are named <kårid>-google-workspace by convention.
+	useEffect(() => {
+		if (!preset?.needsKarId || clientIdTouched) {
+			return;
+		}
+		const id = karId.trim();
+		setClientId(id ? `${id}-google-workspace` : "");
+	}, [preset, karId, clientIdTouched]);
+
 	// Live preview of what will be sent — the old admin hid this normalisation,
 	// which made it hard to tell what had actually been created.
 	const payload = useMemo(() => {
@@ -55,8 +65,9 @@ export function ClientCreate() {
 			domain: normalizeDomain(domain),
 			endpoint,
 			memberships,
+			karId: karId.trim(),
 		});
-	}, [preset, clientId, name, domain, endpoint, memberships]);
+	}, [preset, clientId, name, domain, endpoint, memberships, karId]);
 
 	const submit = async (event: FormEvent) => {
 		event.preventDefault();
@@ -65,6 +76,10 @@ export function ClientCreate() {
 		}
 		if (preset.needsDomain && !normalizeDomain(domain)) {
 			setError("Domän krävs för den här klienttypen.");
+			return;
+		}
+		if (preset.needsKarId && !/^\d+$/.test(karId.trim())) {
+			setError("Kår-ID krävs och ska vara ett nummer, t.ex. 766.");
 			return;
 		}
 		setError(null);
@@ -180,6 +195,26 @@ export function ClientCreate() {
 						/>
 					</label>
 
+					{preset.needsKarId ? (
+						<label className="grid gap-1">
+							<span className="font-medium text-slate-800">
+								Kår-ID (required)
+							</span>
+							<input
+								className="rounded border border-slate-300 px-2 py-1"
+								value={karId}
+								onChange={(e) => setKarId(e.target.value)}
+								placeholder="766"
+								inputMode="numeric"
+							/>
+							<span className="text-sm text-slate-500">
+								Scoutnet-ID för kåren. Syns på profilen under{" "}
+								<em>Primär Scoutkår – ID</em>. Används både i Client ID och i
+								mappern <code>group_email_{karId.trim() || "<kårid>"}</code>.
+							</span>
+						</label>
+					) : null}
+
 					{preset.needsDomain ? (
 						<label className="grid gap-1">
 							<span className="font-medium text-slate-800">
@@ -253,6 +288,27 @@ export function ClientCreate() {
 								</span>
 							</label>
 						</fieldset>
+					) : null}
+
+					{preset.needsKarId ? (
+						<div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+							<p className="mb-1 font-medium">
+								Två steg som inte görs härifrån:
+							</p>
+							<ol className="ml-4 list-decimal">
+								<li>
+									Sätt attributet <code>domain</code> (t.ex.{" "}
+									<code>minkar.se</code>) på gruppen{" "}
+									<code>{karId.trim() || "<kårid>"}</code> under{" "}
+									<code>scoutnet</code> i Keycloak. Utan det får ingen någon
+									e-postclaim och inloggningen fungerar inte.
+								</li>
+								<li>
+									Klistra in Redirect-URI:n som Google visar när SSO-profilen
+									skapats — den läggs till på klientens sida efteråt.
+								</li>
+							</ol>
+						</div>
 					) : null}
 
 					{payload ? (
