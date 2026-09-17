@@ -11,6 +11,9 @@ import {
 } from "../api";
 import { describeClient, hasSecret, MEMBERSHIP_SCOPE } from "../presets";
 
+/** Keycloak stores post-logout redirect URIs as one "##"-separated attribute. */
+const POST_LOGOUT_ATTR = "post.logout.redirect.uris";
+
 export function ClientView({ id }: { id: string }) {
 	const [client, setClient] = useState<KcClient | null>(null);
 	const [error, setError] = useState<string | null>(null);
@@ -21,6 +24,7 @@ export function ClientView({ id }: { id: string }) {
 	// Editable fields, kept separate so Cancel is just a re-fetch.
 	const [name, setName] = useState("");
 	const [redirectUris, setRedirectUris] = useState("");
+	const [postLogoutUris, setPostLogoutUris] = useState("");
 	const [webOrigins, setWebOrigins] = useState("");
 	const [enabled, setEnabled] = useState(true);
 
@@ -41,6 +45,9 @@ export function ClientView({ id }: { id: string }) {
 				setClient(c);
 				setName(c.name ?? "");
 				setRedirectUris((c.redirectUris ?? []).join("\n"));
+				setPostLogoutUris(
+					(c.attributes?.[POST_LOGOUT_ATTR] ?? "").split("##").join("\n"),
+				);
 				setWebOrigins((c.webOrigins ?? []).join("\n"));
 				setEnabled(c.enabled);
 			})
@@ -93,6 +100,15 @@ export function ClientView({ id }: { id: string }) {
 				enabled,
 				redirectUris: lines(redirectUris),
 				webOrigins: lines(webOrigins),
+				// Keycloak merges attributes on update, and an empty value removes
+				// the key, so sending only this one leaves the others untouched.
+				...(client?.protocol !== "saml"
+					? {
+							attributes: {
+								[POST_LOGOUT_ATTR]: lines(postLogoutUris).join("##"),
+							},
+						}
+					: {}),
 			});
 			setSaved(true);
 		} catch (e) {
@@ -218,6 +234,25 @@ export function ClientView({ id }: { id: string }) {
 						onChange={(e) => setRedirectUris(e.target.value)}
 					/>
 				</label>
+
+				{client.protocol !== "saml" ? (
+					<label className="grid gap-1">
+						<span className="font-medium text-slate-800">
+							Post logout redirect-URI:er (en per rad)
+						</span>
+						<textarea
+							className="rounded border border-slate-300 px-2 py-1 font-mono text-sm"
+							rows={2}
+							value={postLogoutUris}
+							onChange={(e) => setPostLogoutUris(e.target.value)}
+						/>
+						<span className="text-sm text-slate-500">
+							<code>+</code> betyder samma som redirect-URI:erna ovan, så nya
+							redirect-URI:er gäller automatiskt även vid utloggning. Tomt
+							tillåter ingen omdirigering efter utloggning.
+						</span>
+					</label>
+				) : null}
 
 				<label className="grid gap-1">
 					<span className="font-medium text-slate-800">

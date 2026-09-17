@@ -227,7 +227,8 @@ export const presets: Preset[] = [
 			redirectUris: [endpoint],
 			// Web origins are scheme+host only; a subdirectory is not valid here.
 			webOrigins: [originOf(domain)],
-			attributes: { "post.logout.redirect.uris": `https://${domain}/*` },
+			// "+" = same as the valid redirect URIs, so later edits stay in step.
+			attributes: { "post.logout.redirect.uris": "+" },
 		}),
 	},
 	{
@@ -249,7 +250,7 @@ export const presets: Preset[] = [
 			webOrigins: [originOf(domain)],
 			attributes: {
 				"pkce.code.challenge.method": "S256",
-				"post.logout.redirect.uris": `https://${domain}/*`,
+				"post.logout.redirect.uris": "+",
 			},
 		}),
 	},
