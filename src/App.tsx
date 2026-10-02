@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ApiError, getMe, login, logout, type Me } from "./api";
+import { getMe, type Me } from "./api";
+import { initAuth, login, logout } from "./auth";
 import { ClientCreate } from "./views/ClientCreate";
 import { ClientList } from "./views/ClientList";
 import { ClientView } from "./views/ClientView";
@@ -34,15 +35,15 @@ export function App() {
 	const hash = useHashRoute();
 
 	useEffect(() => {
-		getMe()
-			.then(setMe)
-			.catch((e: Error) => {
-				if (e instanceof ApiError && e.status === 401) {
+		initAuth()
+			.then((user) => {
+				if (!user) {
 					setSignedOut(true);
-				} else {
-					setError(e.message);
+					return;
 				}
-			});
+				return getMe().then(setMe);
+			})
+			.catch((e: Error) => setError(e.message));
 	}, []);
 
 	if (error) {

@@ -11,6 +11,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from pydantic import BaseModel
 
+from .auth import bearer_token, require_access, require_principal
 from .authz import (
     OWNER_ATTRIBUTE,
     Principal,
@@ -31,21 +32,23 @@ from .presets import (
     describe_client,
     has_secret,
 )
-from .session import check_csrf, require_access, require_principal
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-router = APIRouter(dependencies=[Depends(check_csrf)])
+# No CSRF check: requests authenticate with a bearer token the SPA adds itself,
+# never with a cookie a browser would attach to a cross-site request.
+router = APIRouter()
 
 # Keycloak's internal client ids are UUIDs. Pinning the shape keeps a crafted id
 # such as "../users" from steering the service account to another endpoint.
 ClientId = Annotated[str, Path(pattern=r"^[0-9a-fA-F-]{36}$")]
 
 
-def get_keycloak(request: Request) -> KeycloakAdmin:
-    return request.app.state.keycloak
+def get_keycloak(request: Request, token: str = Depends(bearer_token)) -> KeycloakAdmin:
+    """The Admin API, called with the caller's own token."""
+    return KeycloakAdmin(settings, request.app.state.http, token)
 
 
 # --- Helpers ---
@@ -115,6 +118,15 @@ def _audit(principal: Principal, action: str, client: dict[str, Any], **details:
         owner_of(client) or "-",
         extra,
     )
+
+
+# --- SPA bootstrap ---
+
+
+@router.get("/config")
+async def config() -> dict[str, str]:
+    """Where the SPA logs in. Public: the SPA needs it before anyone is signed in."""
+    return {"authority": settings.issuer, "clientId": settings.KC_CLIENT_ID}
 
 
 # --- Who am I ---

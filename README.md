@@ -89,36 +89,41 @@ ScoutID-attribut* table.
 
 ## Architecture
 
-One container: a FastAPI backend that serves the built SPA and is the only
-thing that talks to Keycloak.
+One container: a FastAPI backend that serves the built SPA and proxies the
+Keycloak Admin REST API, forwarding the user's own token.
 
 ```
-browser ──> /            SPA (Vite build)
-        ──> /auth/*      login against ScoutID (OIDC code flow, confidential client)
-        ──> /api/*       permission-checked API ──> Keycloak Admin REST API (internal)
+browser ──> Keycloak (public host)   login: Authorization Code + PKCE, public client
+        ──> /                         SPA (Vite build)
+        ──> /api/*  + user's token    permission-checked proxy ──> Admin REST API (internal)
 ```
 
-- **Login** is a server-side OIDC code flow with PKCE and a nonce
-  ([`src/app/oidc.py`](src/app/oidc.py)). The browser gets an opaque,
-  HttpOnly session cookie and never sees a token.
-- **Sessions** live in process memory
-  ([`src/app/session.py`](src/app/session.py)). The app runs as a single
-  replica; a restart just means logging in again, which is silent while the
-  Keycloak SSO session lives.
-- **The Admin API** is called by the backend with its own service account
-  (`client_credentials`), over the in-cluster Keycloak Service. Users hold no
-  realm-management roles, so the admin host can stay behind its IP allowlist.
+- **Login** happens in the browser with
+  [oidc-client-ts](https://github.com/authts/oidc-client-ts), against the
+  public client `scoutid-admin-gui`. Where to log in comes from `/api/config`.
+- **Every `/api` call carries the user's access token.** The backend verifies
+  it ([`src/app/auth.py`](src/app/auth.py): signature, issuer, `azp`, `typ`,
+  expiry), derives the Scoutnet permissions from its claims, and forwards the
+  call **with the same token** to the Admin API over the in-cluster Keycloak
+  Service ([`src/app/keycloak.py`](src/app/keycloak.py)).
+- **The browser never calls the Admin API**, so the admin host can stay behind
+  its IP allowlist. The app holds no secret and no service account; Keycloak's
+  admin events show the real user.
 - **The browser never sends a Keycloak representation.** It names a preset and
   fills in a few fields, or edits a fixed set of fields; the server builds what
   Keycloak receives. Anything else in a request body is ignored.
-- **Writes** must carry `X-Requested-With: scoutid-admin` and a matching
-  `Origin`, so a cross-site page cannot make them.
 
 ## Permissions
 
-Permissions come from Scoutnet, through the `memberships` claim of the
-`scoutnet-memberships` scope, and are read once at login
-([`src/app/authz.py`](src/app/authz.py)):
+Two gates must both allow a call:
+
+1. **Keycloak roles, assigned by hand.** The user needs `manage-clients` (or
+   `view-clients` for read-only) on the `realm-management` client, because the
+   Admin API sees their own token. Without it the GUI says the account lacks
+   the role.
+2. **Scoutnet roles, enforced by the backend**, which decide *which* clients.
+   They come from the `memberships` claim of the `scoutnet-memberships` scope
+   ([`src/app/authz.py`](src/app/authz.py)):
 
 | Who | Claim | May |
 |---|---|---|
@@ -136,7 +141,7 @@ Permissions come from Scoutnet, through the `memberships` claim of the
 - IT managers are limited to concrete `https://` redirect URIs and web origins
   (no wildcard hosts); admins are not.
 - A client the user may not see answers 404, not 403.
-- Changes to Scoutnet roles take effect at the next login.
+- Changes to Scoutnet roles take effect when the token is next refreshed.
 
 > [!WARNING]
 > The provider truncates the `memberships` attribute at 2048 characters, and
@@ -148,8 +153,8 @@ The ids are configurable (`ADMIN_ORG_ID`, `ADMIN_ROLE_ID`,
 through a client role on `scoutid-admin-gui`; it is empty, so unused, by
 default.
 
-All writes are logged with the acting user (`AUDIT …` lines), since Keycloak's
-admin events only show the service account.
+All writes are logged with the acting user (`AUDIT …` lines), and appear under
+that user in Keycloak's admin events too.
 
 ## Configuration
 
@@ -158,41 +163,34 @@ Environment variables, read by [`src/app/config.py`](src/app/config.py). See
 
 | Variable | Example | Purpose |
 |---|---|---|
-| `PUBLIC_URL` | `https://clients.id.scouterna.se` | Where the GUI is reached; every redirect URI is built from it |
 | `KC_PUBLIC_URL` | `https://id.scouterna.se` | Keycloak as the browser sees it; base of the expected issuer |
-| `KC_INTERNAL_URL` | `http://scoutid-keycloak:8080` | Keycloak as the backend sees it: token endpoint, JWKS, Admin API |
+| `KC_INTERNAL_URL` | `http://scoutid-keycloak:8080` | Keycloak as the backend sees it: JWKS and Admin API |
 | `KC_REALM` | `scoutid` | |
-| `KC_CLIENT_ID` | `scoutid-admin-gui` | |
-| `KC_CLIENT_SECRET` | *(secret)* | |
-| `SESSION_MAX_AGE` | `28800` | Seconds |
+| `KC_CLIENT_ID` | `scoutid-admin-gui` | The SPA's client; tokens must have been issued to it |
 | `ADMIN_ORG_ID`, `ADMIN_ROLE_ID`, `GROUP_MANAGER_ROLE_ID` | `692`, `235`, `136` | See [Permissions](#permissions) |
 | `ADMIN_CLIENT_ROLE` | *(empty)* | |
-| `INSECURE_COOKIES` | `false` | `true` for plain-HTTP local development |
-| `FAKE_USER_CLAIMS` | *(empty)* | Dev only: sign in as these claims without Keycloak |
 
 ### Required Keycloak client
 
-One confidential client does both jobs: users log in through it, and its
-service account calls the Admin API. In the ScoutID deployment it is declared
-in `scoutid-keycloak-infra` (keycloak-config-cli):
+A public client with PKCE. In the ScoutID deployment it is declared in
+`scoutid-keycloak-infra` (keycloak-config-cli):
 
 ```yaml
 - clientId: scoutid-admin-gui
-  publicClient: false
-  secret: $(env:ADMIN_GUI_CLIENT_SECRET)
+  publicClient: true
   standardFlowEnabled: true
-  serviceAccountsEnabled: true
   directAccessGrantsEnabled: false
-  redirectUris: [https://<host>/auth/callback]
+  redirectUris: [https://<host>/*]
+  webOrigins: [https://<host>]      # the SPA calls Keycloak's token endpoint
   attributes:
     pkce.code.challenge.method: S256
-    post.logout.redirect.uris: https://<host>/
+    post.logout.redirect.uris: https://<host>/*
   optionalClientScopes: [scoutnet-memberships]
 ```
 
-Its service account needs the `realm-management` client roles
-`manage-clients`, `view-clients` and `query-clients`. No web origins are
-needed: the browser only ever talks to the GUI's own origin.
+Users of the GUI need `manage-clients` on `realm-management`, assigned under
+**Users → Role mapping → Assign role → Filter by clients**. The user record
+(`<memberNo>@scoutnet`) exists only after the person's first login.
 
 ## Container image
 
@@ -201,8 +199,9 @@ Built and pushed to `ghcr.io/scouterna/scoutid-keycloak-admin` by
 push (`type=sha` tags, plus `latest` on the default branch), after the SPA lint
 and build and the backend's `ruff` and `pytest` have passed.
 
-The image runs as uid 10001, listens on 8080, writes nothing at runtime (a
-read-only root filesystem works), and answers `/healthz` for probes.
+The image runs as uid 10001, listens on 8080, holds no secrets, writes nothing
+at runtime (a read-only root filesystem works), and answers `/healthz` for
+probes.
 
 ## Development
 
@@ -210,9 +209,8 @@ Backend (Python 3.14, [uv](https://docs.astral.sh/uv/)):
 
 ```sh
 uv sync
-cp .env.example src/.env      # then fill in KC_CLIENT_SECRET
-kubectl --kubeconfig ~/.kube/config.wsv2 -n proj-scoutid-staging \
-  port-forward svc/scoutid-keycloak 8081:8080   # Keycloak, as KC_INTERNAL_URL
+cp .env.example src/.env
+kubectl -n proj-scoutid-staging port-forward svc/scoutid-keycloak 8081:8080   # KC_INTERNAL_URL
 cd src && uv run python start.py               # http://127.0.0.1:8080
 uv run pytest
 uv run ruff check && uv run ruff format --check
@@ -222,14 +220,13 @@ Frontend:
 
 ```sh
 pnpm install
-pnpm dev      # http://localhost:5173, proxies /api and /auth to the backend
+pnpm dev      # http://localhost:5173, proxies /api to the backend
 pnpm build
 pnpm lint
 ```
 
-Logging in through `pnpm dev` needs `http://localhost:5173/auth/callback` among
-the client's redirect URIs. For UI work without Keycloak logins, set
-`FAKE_USER_CLAIMS` instead; the Admin API is still called for real.
+Logging in through `pnpm dev` needs `http://localhost:5173/*` among the
+client's redirect URIs and `http://localhost:5173` among its web origins.
 
 ## Known gaps
 

@@ -6,34 +6,25 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # --- Public identity of this service ---
-    # External base URL of the GUI, e.g. https://clients.id.scouterna.se. Every
-    # URL handed to Keycloak (redirect_uri, post_logout_redirect_uri) is built
-    # from it, never from the incoming request.
-    PUBLIC_URL: str
-
     # --- Keycloak ---
-    # Base URL the *browser* uses: the authorize and end-session redirects go
-    # here, and it is the base of the issuer that id_tokens must carry.
+    # Base URL the *browser* uses: the SPA logs in here, and it is the base of
+    # the issuer that access tokens must carry.
     KC_PUBLIC_URL: str
-    # Base URL the *backend* uses for the token endpoint, the JWKS and the Admin
-    # REST API. In-cluster this is the Keycloak Service, so the admin host can
-    # stay behind its IP allowlist. Empty means "same as KC_PUBLIC_URL", which
-    # only works when the Admin API is reachable there.
+    # Base URL the *backend* uses for the JWKS and the Admin REST API. In-cluster
+    # this is the Keycloak Service, so the admin host can stay behind its IP
+    # allowlist. Empty means "same as KC_PUBLIC_URL", which only works when the
+    # Admin API is reachable there.
     KC_INTERNAL_URL: str = ""
     KC_REALM: str = "scoutid"
-    # One confidential client does both jobs: users log in through it, and its
-    # service account (with realm-management roles) calls the Admin API.
+    # The public client the SPA logs in with. Access tokens must have been
+    # issued to it (azp), so a token minted for some other client is refused.
     KC_CLIENT_ID: str = "scoutid-admin-gui"
-    KC_CLIENT_SECRET: str
 
     # --- Permissions from the Scoutnet `memberships` claim ---
     # A role with this id in memberships.organisations[ADMIN_ORG_ID] makes the
@@ -47,36 +38,19 @@ class Settings(BaseSettings):
     # people whose Scoutnet roles do not say so. Empty disables it.
     ADMIN_CLIENT_ROLE: str = ""
 
-    # --- Sessions ---
-    # Sessions live in process memory; a restart only means logging in again.
-    SESSION_MAX_AGE: int = 8 * 3600
-
-    # --- Dev-only: bypass the identity provider ---
-    # A JSON object of id_token claims. When set, /auth/login signs in as this
-    # user without contacting Keycloak. The Admin API is still called for real.
-    FAKE_USER_CLAIMS: dict[str, Any] = {}
-
     # --- Serving ---
     # The built SPA (pnpm build). Missing in API-only development, in which case
-    # only /api, /auth and /healthz are served.
+    # only /api and /healthz are served.
     STATIC_DIR: Path = Path(__file__).resolve().parents[2] / "dist"
     PORT: int = 8080
     DEBUG: bool = False
-    # Drop the Secure attribute so cookies work over plain HTTP locally.
-    INSECURE_COOKIES: bool = False
 
     model_config = SettingsConfigDict(env_file=".env")
 
-    @field_validator("PUBLIC_URL", "KC_PUBLIC_URL", "KC_INTERNAL_URL")
+    @field_validator("KC_PUBLIC_URL", "KC_INTERNAL_URL")
     @classmethod
     def _strip_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
-
-    @property
-    def public_origin(self) -> str:
-        """scheme://host[:port] of PUBLIC_URL, as browsers send it in Origin."""
-        parts = urlsplit(self.PUBLIC_URL)
-        return f"{parts.scheme}://{parts.netloc}"
 
     @property
     def issuer(self) -> str:

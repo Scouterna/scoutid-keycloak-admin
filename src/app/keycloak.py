@@ -1,13 +1,12 @@
-"""The Keycloak Admin REST API, called as this app's service account.
+"""The Keycloak Admin REST API, called with the user's own access token.
 
-Every call is made with a client_credentials token for KC_CLIENT_ID, whose
-service account holds the realm-management client roles. Who may trigger which
-call is decided in routes_api.py; this module only talks to Keycloak.
+The token arrives from the SPA and is forwarded as-is, so Keycloak's own
+realm-management roles apply on top of the Scoutnet rules in routes_api.py:
+a call this app allows still fails if the user lacks manage-clients. This
+module only talks to Keycloak.
 """
 
-import asyncio
 import logging
-import time
 from typing import Any
 
 import httpx
@@ -15,10 +14,6 @@ import httpx
 from .config import Settings
 
 logger = logging.getLogger(__name__)
-
-# Refresh the service-account token this long before it actually expires, so a
-# request never sets off with a token that dies in flight.
-TOKEN_EXPIRY_MARGIN_SECONDS = 30
 
 
 class KeycloakError(Exception):
@@ -31,50 +26,20 @@ class KeycloakError(Exception):
 
 
 class KeycloakAdmin:
-    def __init__(self, settings: Settings, http: httpx.AsyncClient) -> None:
-        self._settings = settings
+    """Admin API calls on behalf of one user, made with that user's token."""
+
+    def __init__(self, settings: Settings, http: httpx.AsyncClient, token: str) -> None:
         self._http = http
         self._base = settings.admin_api_url
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = asyncio.Lock()
-
-    async def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        try:
-            return await self._http.request(method, url, **kwargs)
-        except httpx.HTTPError as e:
-            logger.error("Keycloak unreachable: %s %s: %r", method, url, e)
-            raise KeycloakError(502, "Kunde inte nå Keycloak.") from e
-
-    # --- Service-account token ---
-
-    async def _access_token(self, *, force: bool = False) -> str:
-        async with self._token_lock:
-            if not force and self._token and time.monotonic() < self._token_expires_at:
-                return self._token
-            response = await self._send(
-                "POST",
-                f"{self._settings.internal_realm_url}/protocol/openid-connect/token",
-                data={"grant_type": "client_credentials"},
-                auth=(self._settings.KC_CLIENT_ID, self._settings.KC_CLIENT_SECRET),
-            )
-            if response.status_code >= 400:
-                logger.error("Service-account token request failed: %s %s", response.status_code, response.text)
-                raise KeycloakError(502, "Kunde inte autentisera mot Keycloak.")
-            body = response.json()
-            self._token = body["access_token"]
-            self._token_expires_at = time.monotonic() + int(body.get("expires_in", 60)) - TOKEN_EXPIRY_MARGIN_SECONDS
-            return self._token
+        self._headers = {"Authorization": f"Bearer {token}"}
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         url = f"{self._base}{path}"
-        token = await self._access_token()
-        response = await self._send(method, url, headers={"Authorization": f"Bearer {token}"}, **kwargs)
-        if response.status_code == 401:
-            # The token can be revoked or the signing key rotated under us; one
-            # fresh token settles which.
-            token = await self._access_token(force=True)
-            response = await self._send(method, url, headers={"Authorization": f"Bearer {token}"}, **kwargs)
+        try:
+            response = await self._http.request(method, url, headers=self._headers, **kwargs)
+        except httpx.HTTPError as e:
+            logger.error("Keycloak unreachable: %s %s: %r", method, url, e)
+            raise KeycloakError(502, "Kunde inte nå Keycloak.") from e
         if response.status_code >= 400:
             raise KeycloakError(response.status_code, _error_detail(response))
         return response

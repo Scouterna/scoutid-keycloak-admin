@@ -20,6 +20,7 @@
 		"@scouterna/ui-react": "^4.3.7",
 		"@scouterna/ui-webc": "^4.3.7",
 		"@tailwindcss/vite": "^4.2.1",
+		"oidc-client-ts": "^3.5.0",
 		"react": "^19.2.3",
 		"react-dom": "^19.2.3",
 		"tailwindcss": "^4.2.1"

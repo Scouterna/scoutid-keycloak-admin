@@ -48,19 +48,6 @@ if not settings.DEBUG:
 
 logging.info("Starting scoutid-keycloak-admin on port %d", settings.PORT)
 
-if settings.FAKE_USER_CLAIMS:
-    banner = "!" * 72
-    logging.warning(
-        "%s\n"
-        "!! FAKE_USER_CLAIMS is set — normal login is BYPASSED.\n"
-        "!! /auth/login signs in %s without authenticating anyone.\n"
-        "!! This must never be set in production.\n"
-        "%s",
-        banner,
-        settings.FAKE_USER_CLAIMS.get("preferred_username") or settings.FAKE_USER_CLAIMS.get("sub"),
-        banner,
-    )
-
 try:
     uvicorn.run(
         "app.main:app",

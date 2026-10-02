@@ -1,10 +1,9 @@
 """The /api routes, against an in-memory Keycloak."""
 
 import pytest
-from conftest import PUBLIC_URL, make_principal
 
 from app.authz import OWNER_ATTRIBUTE
-from app.session import SESSION_COOKIE, get_store
+from app.keycloak import KeycloakError
 
 KAR = {"784": "Trollbäckens Scoutkår"}
 
@@ -16,7 +15,7 @@ def ids(response):
 # --- /me ---
 
 
-def test_me_without_session_is_401(api):
+def test_me_without_token_is_401(api):
     assert api.get("/api/me").status_code == 401
 
 
@@ -229,48 +228,25 @@ def test_memberships_scope_missing_from_realm(api, kc, clients):
     assert response.status_code == 409
 
 
-# --- CSRF ---
+# --- Keycloak's own check ---
 
 
-@pytest.mark.parametrize(
-    "headers",
-    [
-        {"X-Requested-With": "", "Origin": PUBLIC_URL},
-        {"X-Requested-With": "scoutid-admin", "Origin": "https://evil.example"},
-    ],
-)
-def test_mutations_need_the_csrf_header_and_our_origin(api, kc, clients, headers):
-    id = clients["784-wiki"]["id"]
-    response = api.as_user(groups=KAR).delete(f"/api/clients/{id}", headers=headers)
+def test_keycloak_refusal_is_explained(api, kc, clients):
+    # The Scoutnet rules allow it, but the user lacks manage-clients in Keycloak.
+    async def refuse(*args, **kwargs):
+        raise KeycloakError(403, "HTTP 403 Forbidden")
+
+    kc.delete_client = refuse
+    response = api.as_user(groups=KAR).delete(f"/api/clients/{clients['784-wiki']['id']}")
     assert response.status_code == 403
-    assert id in kc.clients
+    assert "manage-clients" in response.json()["detail"]
 
 
-def test_reads_do_not_need_the_csrf_header(api):
-    assert api.as_user(groups=KAR).get("/api/clients", headers={"X-Requested-With": ""}).status_code == 200
-
-
-# --- Real sessions (no require_principal override) ---
-
-
-def test_session_cookie_resolves_to_its_principal(api):
-    session_id = get_store().create(make_principal(groups=KAR), None)
-    api.cookies.set(SESSION_COOKIE, session_id)
-    assert api.get("/api/me").json()["groups"] == KAR
-
-
-@pytest.mark.parametrize("session_id", ["", "made-up"])
-def test_unknown_session_is_401(api, session_id):
-    api.cookies.set(SESSION_COOKIE, session_id)
-    assert api.get("/api/me").status_code == 401
-
-
-def test_expired_session_is_401(api):
-    store = get_store()
-    session_id = store.create(make_principal(groups=KAR), None)
-    store._sessions[session_id].expires_at = 0
-    api.cookies.set(SESSION_COOKIE, session_id)
-    assert api.get("/api/me").status_code == 401
+def test_config_is_public(api):
+    assert api.get("/api/config").json() == {
+        "authority": "https://id.example.test/realms/scoutid",
+        "clientId": "scoutid-admin-gui",
+    }
 
 
 # --- The SPA ---

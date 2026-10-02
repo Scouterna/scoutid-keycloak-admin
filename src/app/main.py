@@ -1,8 +1,7 @@
-"""The app: the SPA, /auth, /api and /healthz behind one origin.
+"""The app: the SPA, /api and /healthz behind one origin.
 
-Serving the SPA from the same process as the API is what lets the browser
-reach Keycloak only through /api: there is no CORS to configure and no token in
-the browser.
+The SPA logs in against Keycloak directly, but reaches the Admin API only
+through /api, which forwards the user's token from inside the cluster.
 """
 
 import logging
@@ -15,12 +14,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .auth import TokenVerifier
 from .authz import PolicyError
 from .config import get_settings
-from .keycloak import KeycloakAdmin, KeycloakError
-from .oidc import OidcClient
+from .keycloak import KeycloakError
 from .routes_api import router as api_router
-from .routes_auth import router as auth_router
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +26,12 @@ settings = get_settings()
 
 HTTP_TIMEOUT = 10.0
 
-# Everything is same-origin. 'unsafe-inline' for styles only, for React's style
-# attributes; scripts are strictly the bundle's own.
+# Same-origin, except that the SPA fetches tokens from Keycloak's public host.
+# 'unsafe-inline' for styles only, for React's style attributes; scripts are
+# strictly the bundle's own, which matters since the token lives in the page.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
+    f"img-src 'self' data:; font-src 'self' data:; connect-src 'self' {settings.KC_PUBLIC_URL}; "
     "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 )
 
@@ -40,8 +39,8 @@ CONTENT_SECURITY_POLICY = (
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
-        app.state.keycloak = KeycloakAdmin(settings, http)
-        app.state.oidc = OidcClient(settings, http)
+        app.state.http = http
+        app.state.verifier = TokenVerifier(settings, http)
         logger.info("Keycloak: issuer %s, Admin API %s", settings.issuer, settings.admin_api_url)
         yield
 
@@ -74,14 +73,19 @@ async def policy_error(_: Request, exc: PolicyError) -> JSONResponse:
 async def keycloak_error(request: Request, exc: KeycloakError) -> JSONResponse:
     # Keycloak's own 4xx (e.g. 409 "Client ... already exists") are meaningful to
     # the user; anything else is our problem, not theirs.
-    if exc.status in (400, 404, 409):
+    if exc.status == 403:
+        # The Scoutnet rules allowed it, but the user's Keycloak roles do not.
+        return JSONResponse(
+            {"detail": "Ditt ScoutID-konto saknar rollen manage-clients i Keycloak. Kontakta ScoutID-teamet."},
+            status_code=403,
+        )
+    if exc.status in (400, 401, 404, 409):
         return JSONResponse({"detail": exc.message}, status_code=exc.status)
     logger.error("Keycloak error on %s %s: %s %s", request.method, request.url.path, exc.status, exc.message)
     return JSONResponse({"detail": f"Keycloak svarade med fel: {exc.message}"}, status_code=502)
 
 
 app.include_router(api_router, prefix="/api", tags=["API"])
-app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -101,7 +105,7 @@ if (static_dir / "index.html").is_file():
     async def spa(full_path: str) -> Response:
         # Unknown API paths must not fall through to index.html, or a typo in a
         # fetch() would come back as a 200 page of HTML.
-        if full_path.startswith(("api/", "auth/")):
+        if full_path.startswith("api/"):
             raise HTTPException(404)
         candidate = (static_dir / full_path).resolve()
         if full_path and candidate.is_file() and candidate.is_relative_to(static_dir):

@@ -3,7 +3,7 @@
 Settings are read at import time, so the environment is set up here, before any
 test module imports `app`. TestClient is deliberately not used as a context
 manager: the lifespan (a real httpx client) never runs, and Keycloak and the
-OIDC client are swapped in through dependency overrides instead.
+token verifier are swapped in through dependency overrides instead.
 """
 
 import copy
@@ -24,26 +24,23 @@ _root = Path(tempfile.mkdtemp())
 
 os.environ.update(
     {
-        "PUBLIC_URL": "https://clients.example.test",
         "KC_PUBLIC_URL": "https://id.example.test",
         "KC_INTERNAL_URL": "http://keycloak.internal:8080",
         "KC_REALM": "scoutid",
         "KC_CLIENT_ID": "scoutid-admin-gui",
-        "KC_CLIENT_SECRET": "test-secret",
         "STATIC_DIR": str(_root / "static"),
     }
 )
-os.environ.pop("FAKE_USER_CLAIMS", None)
 
 from fastapi.testclient import TestClient
 
+from app.auth import require_principal
 from app.authz import OWNER_ATTRIBUTE, Principal
 from app.keycloak import KeycloakError
 from app.main import app
 from app.routes_api import get_keycloak
-from app.session import CSRF_HEADER, CSRF_HEADER_VALUE, require_principal
 
-PUBLIC_URL = os.environ["PUBLIC_URL"]
+PUBLIC_URL = "https://clients.example.test"
 MEMBERSHIP_SCOPE_ID = "scope-memberships"
 
 
@@ -163,8 +160,8 @@ def kc(clients) -> FakeKeycloakAdmin:
 
 @pytest.fixture
 def api(kc):
-    """A TestClient that passes the CSRF check, with `api.as_user(...)` to pick who calls."""
-    client = TestClient(app, base_url=PUBLIC_URL, headers={CSRF_HEADER: CSRF_HEADER_VALUE, "Origin": PUBLIC_URL})
+    """A TestClient with `api.as_user(...)` to pick who calls."""
+    client = TestClient(app, base_url=PUBLIC_URL)
     app.dependency_overrides[get_keycloak] = lambda: kc
 
     def as_user(*, admin: bool = False, groups: dict[str, str] | None = None) -> TestClient:

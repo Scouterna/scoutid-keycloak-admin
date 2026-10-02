@@ -6,16 +6,13 @@ import { defineConfig } from "vite";
 export default defineConfig({
 	plugins: [react(), tailwindcss()],
 	server: {
-		// PUBLIC_URL in the backend's .env points here, and the callback URL
-		// built from it is registered on the Keycloak client, so keep it pinned
-		// rather than letting Vite pick a free port.
+		// The SPA's redirect URI (origin + "/") is registered on the Keycloak
+		// client, so keep the port pinned rather than letting Vite pick one.
 		port: 5173,
 		strictPort: true,
-		// The backend (src/start.py) answers /api and /auth. changeOrigin is
-		// left off so the Origin check sees the browser's own origin.
+		// The backend (src/start.py) answers /api.
 		proxy: {
 			"/api": "http://127.0.0.1:8080",
-			"/auth": "http://127.0.0.1:8080",
 		},
 	},
 });

@@ -1,7 +1,9 @@
+import { accessToken, login } from "./auth";
+
 /**
- * The backend's /api. The browser never talks to Keycloak directly: the
- * backend holds the session, checks permissions and calls the Admin API with
- * its own service account.
+ * The backend's /api. The browser never calls Keycloak's Admin API: it sends
+ * the user's access token here, the backend checks the Scoutnet permissions in
+ * it and forwards the call, with the same token, from inside the cluster.
  */
 
 export interface Me {
@@ -92,16 +94,19 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+	const token = await accessToken();
+	if (!token) {
+		login();
+		throw new ApiError(401, "Inte inloggad.");
+	}
+
 	let response: Response;
 	try {
 		response = await fetch(`/api${path}`, {
 			...init,
-			credentials: "same-origin",
 			headers: {
 				...init?.headers,
-				// Required by the backend on every write: a cross-site page cannot
-				// add it without a CORS preflight, which is never granted.
-				"X-Requested-With": "scoutid-admin",
+				Authorization: `Bearer ${token}`,
 				...(init?.body ? { "Content-Type": "application/json" } : {}),
 			},
 		});
@@ -112,9 +117,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		);
 	}
 
-	if (response.status === 401 && path !== "/me") {
-		// The session expired mid-use. Logging in again is silent while the
-		// Keycloak SSO session lives. /me is exempt: App shows a login button.
+	if (response.status === 401) {
+		// The token was refused (expired, revoked). Logging in again is silent
+		// while the Keycloak SSO session lives.
 		login();
 	}
 
@@ -181,12 +186,3 @@ export const setMemberships = (id: string, on: boolean) =>
 	});
 
 export const MEMBERSHIP_SCOPE = "scoutnet-memberships";
-
-/** Where a 401 sends the browser: the backend starts the Keycloak login. */
-export const login = () => {
-	window.location.href = "/auth/login";
-};
-
-export const logout = () => {
-	window.location.href = "/auth/logout";
-};
