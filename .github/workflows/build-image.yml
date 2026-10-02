@@ -33,7 +33,7 @@ jobs:
         run: pnpm build
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.2.0
 
       - name: Lint backend
         run: uv run ruff check && uv run ruff format --check
