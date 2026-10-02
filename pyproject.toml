@@ -1,0 +1,33 @@
+[project]
+name = "scoutid-keycloak-admin"
+version = "0.2.0"
+description = "Simplified admin GUI for managing ScoutID OAuth clients in Keycloak"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi[standard]",
+    "httpx",
+    "joserfc",
+    "pydantic-settings",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["node_modules", "dist", "scripts"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency markers are meant to sit in argument defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Path", "fastapi.Query"]
+
+[tool.ruff.lint.per-file-ignores]
+# The launcher logs through the root logger and must catch everything to log it.
+"src/start.py" = ["LOG015", "BLE001"]

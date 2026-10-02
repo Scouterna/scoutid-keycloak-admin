@@ -1,103 +1,123 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { createClient, findClient, getClientSecret } from "../api";
 import {
-	hasSecret,
-	normalizeDomain,
-	type PresetId,
-	presetById,
-	presets,
-} from "../presets";
+	type CreateRequest,
+	createClient,
+	listPresets,
+	type Me,
+	type Preset,
+	type Preview,
+	previewClient,
+} from "../api";
 
-export function ClientCreate() {
-	const [presetId, setPresetId] = useState<PresetId | "">("");
-	const [clientId, setClientId] = useState("");
-	const [clientIdTouched, setClientIdTouched] = useState(false);
+/**
+ * The form only collects a preset and a few fields. What gets created — the
+ * full Keycloak client — is decided by the server, which also derives the
+ * entity ID and endpoints; the form shows those back from /clients/preview.
+ */
+export function ClientCreate({ me }: { me: Me }) {
+	const myGroups = Object.entries(me.groups);
+	const [presets, setPresets] = useState<Preset[]>([]);
+	const [presetId, setPresetId] = useState("");
+	const [owner, setOwner] = useState(
+		myGroups.length === 1 ? myGroups[0][0] : "",
+	);
+	/** What the user typed; empty means "use what the server derives". */
+	const [clientIdInput, setClientIdInput] = useState("");
 	const [name, setName] = useState("");
 	const [domain, setDomain] = useState("");
-	/** Derived from the domain, but editable — sites vary. */
-	const [endpoint, setEndpoint] = useState("");
-	const [endpointTouched, setEndpointTouched] = useState(false);
+	const [endpointInput, setEndpointInput] = useState("");
 	const [memberships, setMemberships] = useState(false);
 	const [karId, setKarId] = useState("");
+	const [preview, setPreview] = useState<Preview | null>(null);
+	const [previewError, setPreviewError] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
-	const [secret, setSecret] = useState<string | null>(null);
-	const [created, setCreated] = useState<string | null>(null);
+	const [created, setCreated] = useState<{
+		id: string;
+		clientId: string;
+		secret: string | null;
+	} | null>(null);
 
-	const preset = presetId ? presetById(presetId) : null;
-
-	// Keep the endpoint in step with the domain until the admin edits it.
 	useEffect(() => {
-		if (!preset?.endpoint || endpointTouched) {
-			return;
-		}
-		const clean = normalizeDomain(domain);
-		setEndpoint(clean ? preset.endpoint(clean) : "");
-	}, [preset, domain, endpointTouched]);
+		listPresets()
+			.then(setPresets)
+			.catch((e: Error) => setError(e.message));
+	}, []);
 
-	// For SAML the entity ID is the domain (including any /wp subdirectory),
-	// matching how the legacy SPs are keyed. Derive it until the admin types.
-	useEffect(() => {
-		if (preset?.protocol !== "saml" || clientIdTouched) {
-			return;
-		}
-		setClientId(normalizeDomain(domain));
-	}, [preset, domain, clientIdTouched]);
+	const preset = presets.find((p) => p.id === presetId) ?? null;
+	const ownerId = owner.trim();
+	// OIDC clients owned by a kår are named <kår>-<something>; the prefix is
+	// fixed in the form and only the rest is typed.
+	const prefix =
+		preset?.protocol === "openid-connect" && ownerId ? `${ownerId}-` : "";
 
-	// Google Workspace clients are named <kårid>-google-workspace by convention.
-	useEffect(() => {
-		if (!preset?.needsKarId || clientIdTouched) {
-			return;
-		}
-		const id = karId.trim();
-		setClientId(id ? `${id}-google-workspace` : "");
-	}, [preset, karId, clientIdTouched]);
-
-	// Live preview of what will be sent — the old admin hid this normalisation,
-	// which made it hard to tell what had actually been created.
-	const payload = useMemo(() => {
-		if (!preset || !clientId) {
-			return null;
-		}
-		return preset.build({
-			clientId,
+	const req: CreateRequest | null = useMemo(
+		() =>
+			preset
+				? {
+						preset: preset.id,
+						owner: ownerId || null,
+						clientId: clientIdInput ? `${prefix}${clientIdInput}` : "",
+						name,
+						domain,
+						endpoint: endpointInput,
+						memberships,
+						karId,
+					}
+				: null,
+		[
+			preset,
+			ownerId,
+			prefix,
+			clientIdInput,
 			name,
-			domain: normalizeDomain(domain),
-			endpoint,
+			domain,
+			endpointInput,
 			memberships,
-			karId: karId.trim(),
-		});
-	}, [preset, clientId, name, domain, endpoint, memberships, karId]);
+			karId,
+		],
+	);
+
+	// Live preview of what will be sent, debounced while typing. The old admin
+	// hid this normalisation, which made it hard to tell what had been created.
+	useEffect(() => {
+		if (!req) {
+			setPreview(null);
+			return;
+		}
+		const timer = window.setTimeout(() => {
+			previewClient(req)
+				.then((p) => {
+					setPreview(p);
+					setPreviewError(null);
+				})
+				.catch((e: Error) => {
+					setPreview(null);
+					setPreviewError(e.message);
+				});
+		}, 300);
+		return () => window.clearTimeout(timer);
+	}, [req]);
+
+	const derivedClientId = preview?.clientId.startsWith(prefix)
+		? preview.clientId.slice(prefix.length)
+		: "";
+	const effectiveKarId = ownerId || karId.trim();
 
 	const submit = async (event: FormEvent) => {
 		event.preventDefault();
-		if (!preset || !payload) {
-			return;
-		}
-		if (preset.needsDomain && !normalizeDomain(domain)) {
-			setError("Domän krävs för den här klienttypen.");
-			return;
-		}
-		if (preset.needsKarId && !/^\d+$/.test(karId.trim())) {
-			setError("Kår-ID krävs och ska vara ett nummer, t.ex. 766.");
+		if (!req) {
 			return;
 		}
 		setError(null);
 		setSaving(true);
 		try {
-			await createClient(payload);
-			setCreated(clientId);
-			// Confidential clients get a generated secret the admin needs in
-			// order to configure the other end.
-			if (hasSecret(payload as never)) {
-				const stored = await findClient(clientId);
-				if (stored) {
-					const result = await getClientSecret(stored.id);
-					setSecret(result.value);
-					return;
-				}
+			const result = await createClient(req);
+			if (result.secret) {
+				setCreated(result);
+			} else {
+				window.location.hash = `#/clients/${result.id}`;
 			}
-			window.location.hash = "#/clients";
 		} catch (e) {
 			setError((e as Error).message);
 		} finally {
@@ -105,20 +125,21 @@ export function ClientCreate() {
 		}
 	};
 
-	if (created && secret) {
+	if (created?.secret) {
 		return (
 			<div>
 				<h2 className="mb-4 text-xl font-semibold text-slate-900">
-					Klient {created} skapad
+					Klient {created.clientId} skapad
 				</h2>
 				<p className="mb-2 text-slate-700">
-					Client secret — kopiera nu, den visas inte igen på den här sidan:
+					Client secret — kopiera nu, eller hämta den senare från klientens
+					sida:
 				</p>
 				<pre className="mb-4 overflow-x-auto rounded border border-amber-300 bg-amber-50 p-3 font-mono text-sm">
-					{secret}
+					{created.secret}
 				</pre>
-				<a href="#/clients" className="text-blue-700 underline">
-					← Lista klienter
+				<a href={`#/clients/${created.id}`} className="text-blue-700 underline">
+					Till klienten →
 				</a>
 			</div>
 		);
@@ -135,6 +156,8 @@ export function ClientCreate() {
 				Lägg till klient
 			</h2>
 
+			<OwnerField me={me} owner={owner} setOwner={setOwner} />
+
 			<fieldset className="mb-6">
 				<legend className="mb-2 font-medium text-slate-800">Typ</legend>
 				<div className="grid gap-2">
@@ -150,7 +173,8 @@ export function ClientCreate() {
 								checked={presetId === p.id}
 								onChange={() => {
 									setPresetId(p.id);
-									setEndpointTouched(false);
+									setClientIdInput("");
+									setEndpointInput("");
 									setMemberships(p.membershipsByDefault);
 								}}
 								className="mt-1"
@@ -172,17 +196,26 @@ export function ClientCreate() {
 				<div className="grid gap-4">
 					<label className="grid gap-1">
 						<span className="font-medium text-slate-800">
-							Client ID / Entity ID (required)
+							{preset.protocol === "saml" ? "Entity ID" : "Client ID"} (krävs)
 						</span>
-						<input
-							className="rounded border border-slate-300 px-2 py-1"
-							value={clientId}
-							onChange={(e) => {
-								setClientId(e.target.value);
-								setClientIdTouched(true);
-							}}
-							required
-						/>
+						<span className="flex items-center">
+							{prefix ? (
+								<span className="rounded-l border border-r-0 border-slate-300 bg-slate-100 px-2 py-1 font-mono text-sm">
+									{prefix}
+								</span>
+							) : null}
+							<input
+								className={`w-full border border-slate-300 px-2 py-1 ${prefix ? "rounded-r" : "rounded"}`}
+								value={clientIdInput}
+								onChange={(e) => setClientIdInput(e.target.value)}
+								placeholder={derivedClientId}
+							/>
+						</span>
+						{preset.protocol === "saml" ? (
+							<span className="text-sm text-slate-500">
+								Härleds från domänen om fältet lämnas tomt.
+							</span>
+						) : null}
 					</label>
 
 					<label className="grid gap-1">
@@ -191,15 +224,13 @@ export function ClientCreate() {
 							className="rounded border border-slate-300 px-2 py-1"
 							value={name}
 							onChange={(e) => setName(e.target.value)}
-							placeholder={clientId}
+							placeholder={preview?.clientId}
 						/>
 					</label>
 
-					{preset.needsKarId ? (
+					{preset.needsKarId && !ownerId ? (
 						<label className="grid gap-1">
-							<span className="font-medium text-slate-800">
-								Kår-ID (required)
-							</span>
+							<span className="font-medium text-slate-800">Kår-ID (krävs)</span>
 							<input
 								className="rounded border border-slate-300 px-2 py-1"
 								value={karId}
@@ -208,18 +239,15 @@ export function ClientCreate() {
 								inputMode="numeric"
 							/>
 							<span className="text-sm text-slate-500">
-								Scoutnet-ID för kåren. Syns på profilen under{" "}
-								<em>Primär Scoutkår – ID</em>. Används både i Client ID och i
-								mappern <code>group_email_{karId.trim() || "<kårid>"}</code>.
+								Scoutnet-ID för kåren. Används både i Client ID och i mappern{" "}
+								<code>group_email_{effectiveKarId || "<kårid>"}</code>.
 							</span>
 						</label>
 					) : null}
 
 					{preset.needsDomain ? (
 						<label className="grid gap-1">
-							<span className="font-medium text-slate-800">
-								Domän (required)
-							</span>
+							<span className="font-medium text-slate-800">Domän (krävs)</span>
 							<input
 								className="rounded border border-slate-300 px-2 py-1"
 								value={domain}
@@ -235,7 +263,7 @@ export function ClientCreate() {
 						</label>
 					) : null}
 
-					{preset.endpoint ? (
+					{preset.hasEndpoint ? (
 						<label className="grid gap-1">
 							<span className="font-medium text-slate-800">
 								{preset.protocol === "saml"
@@ -244,21 +272,19 @@ export function ClientCreate() {
 							</span>
 							<input
 								className="rounded border border-slate-300 px-2 py-1 font-mono text-sm"
-								value={endpoint}
-								onChange={(e) => {
-									setEndpoint(e.target.value);
-									setEndpointTouched(true);
-								}}
+								value={endpointInput}
+								onChange={(e) => setEndpointInput(e.target.value)}
+								placeholder={preview?.endpoint}
 							/>
 							<span className="text-sm text-slate-500">
 								{preset.id === "karwebb"
-									? "Härledd från domänen. Sajter som kör WordPress i en underkatalog använder /wp/wp-login.php — ändra vid behov."
-									: "Härledd från domänen. Kontrollera mot tjänstens metadata."}
+									? "Härleds från domänen om fältet lämnas tomt. Sajter som kör WordPress i en underkatalog använder /wp/wp-login.php."
+									: "Härleds från domänen om fältet lämnas tomt. Kontrollera mot tjänstens metadata."}
 							</span>
 						</label>
 					) : null}
 
-					{preset.protocol === "openid-connect" ? (
+					{preset.protocol === "openid-connect" && !preset.needsKarId ? (
 						<fieldset className="rounded border border-slate-300 p-3">
 							<legend className="px-1 font-medium text-slate-800">
 								Organisationsdata
@@ -297,11 +323,12 @@ export function ClientCreate() {
 							</p>
 							<ol className="ml-4 list-decimal">
 								<li>
-									Sätt attributet <code>domain</code> (t.ex.{" "}
-									<code>minkar.se</code>) på gruppen{" "}
-									<code>{karId.trim() || "<kårid>"}</code> under{" "}
+									Attributet <code>domain</code> (t.ex. <code>minkar.se</code>)
+									måste vara satt på gruppen{" "}
+									<code>{effectiveKarId || "<kårid>"}</code> under{" "}
 									<code>scoutnet</code> i Keycloak. Utan det får ingen någon
-									e-postclaim och inloggningen fungerar inte.
+									e-postclaim och inloggningen fungerar inte. Kontakta
+									ScoutID-teamet om det inte är gjort.
 								</li>
 								<li>
 									Klistra in Redirect-URI:n som Google visar när SSO-profilen
@@ -311,17 +338,19 @@ export function ClientCreate() {
 						</div>
 					) : null}
 
-					{payload ? (
+					{preview ? (
 						<div>
 							<p className="mb-1 font-medium text-slate-800">Detta skapas:</p>
 							<pre className="overflow-x-auto rounded bg-slate-100 p-3 text-xs">
-								{JSON.stringify(payload, null, 2)}
+								{JSON.stringify(preview.payload, null, 2)}
 							</pre>
 							<p className="mt-1 text-sm text-slate-500">
 								Keycloak normaliserar och sorterar om vissa fält, så det sparade
 								resultatet kan se något annorlunda ut.
 							</p>
 						</div>
+					) : previewError ? (
+						<p className="text-sm text-slate-500">{previewError}</p>
 					) : null}
 
 					{error ? (
@@ -342,5 +371,67 @@ export function ClientCreate() {
 				</div>
 			) : null}
 		</form>
+	);
+}
+
+/**
+ * Which kår the client belongs to. IT managers pick one of their own kårer;
+ * admins may give any kår number, or none for clients only admins manage.
+ */
+function OwnerField({
+	me,
+	owner,
+	setOwner,
+}: {
+	me: Me;
+	owner: string;
+	setOwner: (owner: string) => void;
+}) {
+	const myGroups = Object.entries(me.groups);
+
+	if (me.isAdmin) {
+		return (
+			<label className="mb-6 grid gap-1">
+				<span className="font-medium text-slate-800">Kår</span>
+				<input
+					className="w-40 rounded border border-slate-300 px-2 py-1"
+					value={owner}
+					onChange={(e) => setOwner(e.target.value)}
+					placeholder="ingen"
+					inputMode="numeric"
+				/>
+				<span className="text-sm text-slate-500">
+					Kårens Scoutnet-ID. Kårens IT-ansvariga kan sedan hantera klienten.
+					Lämna tomt för klienter som bara administratörer hanterar.
+				</span>
+			</label>
+		);
+	}
+
+	if (myGroups.length === 1) {
+		return (
+			<p className="mb-6 text-slate-700">
+				Kår: <strong>{myGroups[0][1]}</strong> ({myGroups[0][0]})
+			</p>
+		);
+	}
+
+	return (
+		<label className="mb-6 grid gap-1">
+			<span className="font-medium text-slate-800">Kår (krävs)</span>
+			<select
+				className="w-fit rounded border border-slate-300 px-2 py-1"
+				value={owner}
+				onChange={(e) => setOwner(e.target.value)}
+				required
+			>
+				<option value="">-- Välj kår --</option>
+				{myGroups.map(([id, name]) => (
+					<option key={id} value={id}>
+						{id} {name}
+					</option>
+				))}
+			</select>
+		</label>
 	);
 }

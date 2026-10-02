@@ -1,7 +1,5 @@
-import type { User } from "oidc-client-ts";
 import { useEffect, useState } from "react";
-import { initAuth, login, logout } from "./auth";
-import { config, isConfigured } from "./config";
+import { ApiError, getMe, login, logout, type Me } from "./api";
 import { ClientCreate } from "./views/ClientCreate";
 import { ClientList } from "./views/ClientList";
 import { ClientView } from "./views/ClientView";
@@ -20,69 +18,61 @@ function useHashRoute(): string {
 	return hash;
 }
 
+/** What the signed-in user may do, in a few words for the header. */
+function describeRole(me: Me): string {
+	if (me.isAdmin) {
+		return "Administratör";
+	}
+	const groups = Object.entries(me.groups).map(([id, name]) => `${id} ${name}`);
+	return groups.length ? `IT-ansvarig: ${groups.join(", ")}` : "";
+}
+
 export function App() {
-	const [user, setUser] = useState<User | null>(null);
-	const [loading, setLoading] = useState(true);
-	const [authError, setAuthError] = useState<string | null>(null);
+	const [me, setMe] = useState<Me | null>(null);
+	const [signedOut, setSignedOut] = useState(false);
+	const [error, setError] = useState<string | null>(null);
 	const hash = useHashRoute();
 
 	useEffect(() => {
-		// Nothing to resolve against when no realm is configured; the setup
-		// message below is rendered instead.
-		if (!isConfigured) {
-			setLoading(false);
-			return;
-		}
-		initAuth()
-			.then(setUser)
-			.catch((error: Error) => setAuthError(error.message))
-			.finally(() => setLoading(false));
+		getMe()
+			.then(setMe)
+			.catch((e: Error) => {
+				if (e instanceof ApiError && e.status === 401) {
+					setSignedOut(true);
+				} else {
+					setError(e.message);
+				}
+			});
 	}, []);
 
-	if (!isConfigured) {
+	if (error) {
 		return (
-			<div className="mx-auto max-w-2xl p-6">
-				<h1 className="mb-4 text-2xl font-bold text-slate-900">
-					ScoutID Admin
-				</h1>
-				<p className="mb-3 rounded border border-amber-300 bg-amber-50 p-3 text-amber-900">
-					Ingen Keycloak-server är konfigurerad.
-				</p>
-				<p className="mb-2 text-slate-700">
-					Sätt <code>VITE_KC_URL</code> och <code>VITE_KC_REALM</code> i en{" "}
-					<code>.env.local</code> för lokal utveckling, eller{" "}
-					<code>KC_URL</code> och <code>KC_REALM</code> som miljövariabler i
-					containern. Se README.
+			<div className="mx-auto max-w-5xl p-6">
+				<p className="rounded border border-red-300 bg-red-50 p-3 text-red-800">
+					{error}
 				</p>
 			</div>
 		);
 	}
 
-	if (loading) {
+	if (!me && !signedOut) {
 		return <p className="p-8 text-slate-600">Laddar…</p>;
 	}
 
 	return (
 		<div className="mx-auto max-w-5xl p-6">
 			<header className="mb-8 flex items-baseline justify-between gap-4 border-b border-slate-200 pb-4">
-				<div>
-					<h1 className="text-2xl font-bold text-slate-900">
-						<a href="#/clients">ScoutID Admin</a>
-					</h1>
-					<p className="text-sm text-slate-500">
-						{config.realm} @ {new URL(config.authority).host}
-					</p>
-				</div>
-				{user ? (
+				<h1 className="text-2xl font-bold text-slate-900">
+					<a href="#/clients">ScoutID Admin</a>
+				</h1>
+				{me ? (
 					<div className="text-right text-sm">
-						<p className="text-slate-700">
-							Inloggad som{" "}
-							{user.profile.name ?? user.profile.preferred_username}
-						</p>
+						<p className="text-slate-700">Inloggad som {me.name}</p>
+						<p className="text-slate-500">{describeRole(me)}</p>
 						<button
 							type="button"
 							className="text-blue-700 underline"
-							onClick={() => logout()}
+							onClick={logout}
 						>
 							Logga ut
 						</button>
@@ -90,39 +80,57 @@ export function App() {
 				) : null}
 			</header>
 
-			{authError ? (
-				<p className="mb-4 rounded border border-red-300 bg-red-50 p-3 text-red-800">
-					Inloggning misslyckades: {authError}
-				</p>
-			) : null}
-
-			{!user ? (
+			{!me ? (
 				<div>
 					<p className="mb-4 text-slate-700">
-						Logga in för att administrera OAuth-klienter.
+						Logga in med ScoutID för att administrera klienter.
 					</p>
 					<button
 						type="button"
 						className="rounded bg-blue-700 px-4 py-2 font-medium text-white"
-						onClick={() => login()}
+						onClick={login}
 					>
 						Logga in
 					</button>
 				</div>
+			) : !me.hasAccess ? (
+				<NoAccess me={me} />
 			) : (
-				<Router hash={hash} />
+				<Router hash={hash} me={me} />
 			)}
 		</div>
 	);
 }
 
-function Router({ hash }: { hash: string }) {
+function NoAccess({ me }: { me: Me }) {
+	return (
+		<div className="grid gap-3 text-slate-700">
+			<p className="rounded border border-amber-300 bg-amber-50 p-3 text-amber-900">
+				Du saknar behörighet att administrera klienter.
+			</p>
+			<p>
+				Behörighet kommer från Scoutnet: rollen <em>IT-ansvarig</em> i en kår
+				ger rätt att hantera kårens klienter. Ändras rollen i Scoutnet gäller
+				det från nästa inloggning.
+			</p>
+			{me.membershipsError ? (
+				<p className="rounded border border-red-300 bg-red-50 p-3 text-red-800">
+					Dina uppgifter från Scoutnet blev ofullständiga (
+					<code>{me.membershipsError}</code>), vilket kan vara orsaken. Kontakta
+					ScoutID-teamet.
+				</p>
+			) : null}
+		</div>
+	);
+}
+
+function Router({ hash, me }: { hash: string; me: Me }) {
 	if (hash === "#/clients/add") {
-		return <ClientCreate />;
+		return <ClientCreate me={me} />;
 	}
 	const match = hash.match(/^#\/clients\/([^/]+)$/);
 	if (match) {
-		return <ClientView id={match[1]} />;
+		return <ClientView id={match[1]} me={me} />;
 	}
-	return <ClientList />;
+	return <ClientList me={me} />;
 }

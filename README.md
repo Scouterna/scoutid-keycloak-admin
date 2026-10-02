@@ -16,7 +16,7 @@ actually perform, rather than the full generic Keycloak admin console.
 It is the successor to the `/admin` GUI in the old SimpleSAMLphp ScoutID
 application, where admins registered SAML Service Providers by domain.
 
-**Status: demo.** Read/create/edit of clients only.
+**Status: demo.** Create, edit and delete clients; deployed to ScoutID staging.
 
 > [!IMPORTANT]
 > **How ScoutID clients should be configured is documented in
@@ -32,8 +32,8 @@ application, where admins registered SAML Service Providers by domain.
 The GUI's value over the generic Keycloak console is that it asks for a couple
 of fields and expands them into a complete client, instead of requiring the
 right answers in ~40 console fields. Presets live in
-[`src/presets.ts`](src/presets.ts), and the create form shows the exact JSON
-that will be sent before you submit.
+[`src/app/presets.py`](src/app/presets.py) on the server, and the create form
+shows the exact JSON that will be sent before you submit.
 
 - **Google Workspace (OIDC)** — follows the provider guide's Google Workspace
   section: confidential client named `<kårid>-google-workspace`, root URL
@@ -89,134 +89,147 @@ ScoutID-attribut* table.
 
 ## Architecture
 
-A static SPA with no backend of its own.
+One container: a FastAPI backend that serves the built SPA and is the only
+thing that talks to Keycloak.
 
-- The admin signs in with **Authorization Code + PKCE** against the ScoutID realm.
-- The GUI calls the **Keycloak Admin REST API** directly from the browser with
-  that user's token.
-- Authorization is entirely Keycloak's: the realm-management roles on the
-  signed-in account decide what the API permits. The GUI does not implement its
-  own permission model.
+```
+browser ──> /            SPA (Vite build)
+        ──> /auth/*      login against ScoutID (OIDC code flow, confidential client)
+        ──> /api/*       permission-checked API ──> Keycloak Admin REST API (internal)
+```
 
-Backend services typically reach the same API with a `client_credentials`
-service account instead. That pattern is deliberately *not* used here — a
-browser app cannot hold a client secret.
+- **Login** is a server-side OIDC code flow with PKCE and a nonce
+  ([`src/app/oidc.py`](src/app/oidc.py)). The browser gets an opaque,
+  HttpOnly session cookie and never sees a token.
+- **Sessions** live in process memory
+  ([`src/app/session.py`](src/app/session.py)). The app runs as a single
+  replica; a restart just means logging in again, which is silent while the
+  Keycloak SSO session lives.
+- **The Admin API** is called by the backend with its own service account
+  (`client_credentials`), over the in-cluster Keycloak Service. Users hold no
+  realm-management roles, so the admin host can stay behind its IP allowlist.
+- **The browser never sends a Keycloak representation.** It names a preset and
+  fills in a few fields, or edits a fixed set of fields; the server builds what
+  Keycloak receives. Anything else in a request body is ignored.
+- **Writes** must carry `X-Requested-With: scoutid-admin` and a matching
+  `Origin`, so a cross-site page cannot make them.
+
+## Permissions
+
+Permissions come from Scoutnet, through the `memberships` claim of the
+`scoutnet-memberships` scope, and are read once at login
+([`src/app/authz.py`](src/app/authz.py)):
+
+| Who | Claim | May |
+|---|---|---|
+| Admin | a role with id `235` in `memberships.organisations["692"]` | manage every client, and assign clients to kårer |
+| Kår IT manager | a role with id `136` (`it_manager`) in `memberships.groups[<kår>]` | create and manage clients owned by that kår |
+
+- **Ownership** is the client attribute `scoutid.owner.group=<kår>`. That
+  attribute, not the name, decides access.
+- **OIDC clients owned by a kår are named `<kår>-<name>`**, e.g.
+  `784-photoprism`, so kårer cannot collide. SAML clients keep their entity ID,
+  which the service dictates.
+- **Clients without an owner** (migrated SAML SPs, older clients) are visible to
+  admins only. An admin hands one over by setting its kår.
+- **Keycloak's built-in clients and this GUI's own** are read-only here.
+- IT managers are limited to concrete `https://` redirect URIs and web origins
+  (no wildcard hosts); admins are not.
+- A client the user may not see answers 404, not 403.
+- Changes to Scoutnet roles take effect at the next login.
+
+> [!WARNING]
+> The provider truncates the `memberships` attribute at 2048 characters, and
+> the truncated form drops `organisations`. Someone with very many roles can
+> therefore lose admin rights. The GUI says so when it happens.
+
+The ids are configurable (`ADMIN_ORG_ID`, `ADMIN_ROLE_ID`,
+`GROUP_MANAGER_ROLE_ID`). `ADMIN_CLIENT_ROLE` is a hook for also granting admin
+through a client role on `scoutid-admin-gui`; it is empty, so unused, by
+default.
+
+All writes are logged with the acting user (`AUDIT …` lines), since Keycloak's
+admin events only show the service account.
 
 ## Configuration
 
-The host and realm must be set explicitly — there is no default, since this GUI
-holds full admin rights over whichever realm it is pointed at. For local
-development, create a `.env.local`:
+Environment variables, read by [`src/app/config.py`](src/app/config.py). See
+[`.env.example`](.env.example).
 
-```sh
-VITE_KC_URL=https://<keycloak-admin-host>
-VITE_KC_REALM=<realm>
-VITE_KC_CLIENT_ID=scoutid-admin-gui
-```
-
-`VITE_KC_URL` must be a host that serves **both** the OIDC endpoints and
-`/admin/realms/*`. Keycloak splits these across two hostnames — `KC_HOSTNAME`
-serves `/realms/*` and `KC_HOSTNAME_ADMIN` serves those *plus* `/admin/*` — so
-always use the admin hostname. Tokens are still issued by the public hostname,
-so the `iss` claim will not match `VITE_KC_URL`; that is expected.
-
-### CORS
-
-The Admin REST API derives `Access-Control-Allow-Origin` from the **Web origins
-of the client that issued the token** (the `azp` claim), not from the endpoint
-being requested. A request from an origin missing on *this GUI's* client is
-rejected by the browser with an opaque `NetworkError`, even when the API itself
-returns 200.
-
-Two consequences worth knowing when debugging:
-
-- Testing the API with `curl` and a token from `admin-cli` will *never* show
-  CORS headers, because `admin-cli` ships with empty Web origins. That is not
-  evidence of a broken deployment.
-- Preflight (`OPTIONS`) succeeds regardless, so a passing preflight says nothing
-  about whether the real request will be allowed.
+| Variable | Example | Purpose |
+|---|---|---|
+| `PUBLIC_URL` | `https://clients.id.scouterna.se` | Where the GUI is reached; every redirect URI is built from it |
+| `KC_PUBLIC_URL` | `https://id.scouterna.se` | Keycloak as the browser sees it; base of the expected issuer |
+| `KC_INTERNAL_URL` | `http://scoutid-keycloak:8080` | Keycloak as the backend sees it: token endpoint, JWKS, Admin API |
+| `KC_REALM` | `scoutid` | |
+| `KC_CLIENT_ID` | `scoutid-admin-gui` | |
+| `KC_CLIENT_SECRET` | *(secret)* | |
+| `SESSION_MAX_AGE` | `28800` | Seconds |
+| `ADMIN_ORG_ID`, `ADMIN_ROLE_ID`, `GROUP_MANAGER_ROLE_ID` | `692`, `235`, `136` | See [Permissions](#permissions) |
+| `ADMIN_CLIENT_ROLE` | *(empty)* | |
+| `INSECURE_COOKIES` | `false` | `true` for plain-HTTP local development |
+| `FAKE_USER_CLAIMS` | *(empty)* | Dev only: sign in as these claims without Keycloak |
 
 ### Required Keycloak client
 
-This GUI needs a public client in the realm. Create it once in the Keycloak
-admin console:
+One confidential client does both jobs: users log in through it, and its
+service account calls the Admin API. In the ScoutID deployment it is declared
+in `scoutid-keycloak-infra` (keycloak-config-cli):
 
-| Setting | Value |
-|---|---|
-| Client ID | `scoutid-admin-gui` |
-| Client authentication | Off (public) |
-| Standard flow | Enabled |
-| PKCE method | `S256` |
-| Valid redirect URIs | `http://localhost:5173/*` |
-| Web origins | `http://localhost:5173` |
+```yaml
+- clientId: scoutid-admin-gui
+  publicClient: false
+  secret: $(env:ADMIN_GUI_CLIENT_SECRET)
+  standardFlowEnabled: true
+  serviceAccountsEnabled: true
+  directAccessGrantsEnabled: false
+  redirectUris: [https://<host>/auth/callback]
+  attributes:
+    pkce.code.challenge.method: S256
+    post.logout.redirect.uris: https://<host>/
+  optionalClientScopes: [scoutnet-memberships]
+```
 
-Add the deployed origin to both lists when hosting it somewhere other than a
-local dev server.
-
-Admins using the GUI need the realm-management roles for managing clients.
-Assign them per user under **Users → Role mapping → Assign role**, switching the
-filter to **Filter by clients** (the roles live on the `realm-management`
-client, so they are hidden under the default realm-roles filter):
-
-| Role | Grants |
-|---|---|
-| `manage-clients` | Create, edit and delete clients — what this GUI needs |
-| `view-clients` | Read-only; the list and view screens work, create/edit 403s |
-
-For a Scoutnet-backed realm the user record is named `scoutnet|<memberNo>`, and
-is created on that person's first login — so they must log in once before a
-role can be assigned. Role mappings are stored in Keycloak and are not touched
-by the ScoutID provider on subsequent logins, so they persist.
+Its service account needs the `realm-management` client roles
+`manage-clients`, `view-clients` and `query-clients`. No web origins are
+needed: the browser only ever talks to the GUI's own origin.
 
 ## Container image
 
 Built and pushed to `ghcr.io/scouterna/scoutid-keycloak-admin` by
 [.github/workflows/build-image.yml](.github/workflows/build-image.yml) on every
-push (`type=sha` tags, plus `latest` on the default branch).
+push (`type=sha` tags, plus `latest` on the default branch), after the SPA lint
+and build and the backend's `ruff` and `pytest` have passed.
 
-The image is a static nginx build with **no baked-in environment**. Vite inlines
-`import.meta.env` at build time, so instead the app reads
-`window.__SCOUTID_CONFIG__` from `/config.js`, which
-[docker/entrypoint.sh](docker/entrypoint.sh) writes at container startup. One
-image therefore serves any environment:
-
-```sh
-podman run -p 8080:8080 \
-  -e KC_URL=https://<keycloak-admin-host> \
-  -e KC_REALM=<realm> \
-  -e KC_CLIENT_ID=scoutid-admin-gui \
-  ghcr.io/scouterna/scoutid-keycloak-admin:latest
-```
-
-It runs unprivileged (uid 101) and listens on 8080. `/healthz` returns 200 for
-probes.
-
-## Deploying
-
-The image is a self-contained static site, so deployment is whatever your
-environment already uses — the only requirements are to serve it over HTTPS and
-set the three `KC_*` environment variables described above.
-
-Deployment manifests are intentionally not part of this repository.
-
-> [!IMPORTANT]
-> Whatever hostname you deploy on must also be added to the `scoutid-admin-gui`
-> Keycloak client as a valid redirect URI (`https://<host>/*`) **and** a web
-> origin (`https://<host>`). Without the web origin the Admin API calls fail
-> with an opaque `NetworkError` — see [CORS](#cors) above.
+The image runs as uid 10001, listens on 8080, writes nothing at runtime (a
+read-only root filesystem works), and answers `/healthz` for probes.
 
 ## Development
 
+Backend (Python 3.14, [uv](https://docs.astral.sh/uv/)):
+
 ```sh
-pnpm install
-pnpm dev      # http://localhost:5173
-pnpm build
-pnpm lint
-pnpm format
+uv sync
+cp .env.example src/.env      # then fill in KC_CLIENT_SECRET
+kubectl --kubeconfig ~/.kube/config.wsv2 -n proj-scoutid-staging \
+  port-forward svc/scoutid-keycloak 8081:8080   # Keycloak, as KC_INTERNAL_URL
+cd src && uv run python start.py               # http://127.0.0.1:8080
+uv run pytest
+uv run ruff check && uv run ruff format --check
 ```
 
-The dev server is pinned to port 5173 (`strictPort`) because the port is part of
-the redirect URI registered on the Keycloak client.
+Frontend:
+
+```sh
+pnpm install
+pnpm dev      # http://localhost:5173, proxies /api and /auth to the backend
+pnpm build
+pnpm lint
+```
+
+Logging in through `pnpm dev` needs `http://localhost:5173/auth/callback` among
+the client's redirect URIs. For UI work without Keycloak logins, set
+`FAKE_USER_CLAIMS` instead; the Admin API is still called for real.
 
 ## Known gaps
 
@@ -224,7 +237,6 @@ the redirect URI registered on the Keycloak client.
   derived from the legacy data and accepted by Keycloak, but signing behaviour
   and NameID handling are only proven by an end-to-end test against a real
   service provider.
-- **No delete.** Clients can be created and edited, not removed; use the
-  Keycloak console.
 - **No import / export**, as the old admin GUI had.
 - Client secret **regeneration** (the current secret can be displayed).
+- Editing a SAML client's redirect URIs does not update its ACS attributes.

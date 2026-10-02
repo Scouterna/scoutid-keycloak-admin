@@ -1,34 +1,85 @@
-import { userManager } from "./auth";
-import { adminBase, config } from "./config";
+/**
+ * The backend's /api. The browser never talks to Keycloak directly: the
+ * backend holds the session, checks permissions and calls the Admin API with
+ * its own service account.
+ */
 
-/** The subset of Keycloak's client representation this GUI works with. */
-export interface KcClient {
-	id: string;
-	clientId: string;
-	name?: string;
-	description?: string;
-	/** "openid-connect" (default) or "saml". */
-	protocol?: string;
-	enabled: boolean;
-	publicClient: boolean;
-	standardFlowEnabled: boolean;
-	serviceAccountsEnabled: boolean;
-	frontchannelLogout?: boolean;
-	redirectUris?: string[];
-	webOrigins?: string[];
-	adminUrl?: string;
-	rootUrl?: string;
-	defaultClientScopes?: string[];
-	attributes?: Record<string, string>;
-	protocolMappers?: KcProtocolMapper[];
+export interface Me {
+	name: string;
+	username: string;
+	isAdmin: boolean;
+	/** Scoutnet group id → name, for every kår the user is IT manager of. */
+	groups: Record<string, string>;
+	hasAccess: boolean;
+	/** Set when Scoutnet data had to be truncated, which can drop admin rights. */
+	membershipsError: string | null;
 }
 
-/** A claim mapper created together with the client, on its dedicated scope. */
-export interface KcProtocolMapper {
+export interface Preset {
+	id: string;
+	label: string;
+	description: string;
+	protocol: "openid-connect" | "saml";
+	needsDomain: boolean;
+	needsKarId: boolean;
+	hasEndpoint: boolean;
+	membershipsByDefault: boolean;
+}
+
+export type ClientType = "saml" | "service" | "public" | "confidential";
+
+export interface ClientSummary {
+	id: string;
+	clientId: string;
 	name: string;
+	enabled: boolean;
+	type: ClientType;
+	/** The owning kår, or null for clients only admins manage. */
+	owner: string | null;
+	/** Keycloak's own clients and this GUI's: read-only here. */
+	protected: boolean;
+	endpoints: string[];
+}
+
+export interface ClientDetail extends ClientSummary {
 	protocol: string;
-	protocolMapper: string;
-	config: Record<string, string>;
+	hasSecret: boolean;
+	redirectUris: string[];
+	postLogoutRedirectUris: string[];
+	webOrigins: string[];
+	defaultClientScopes: string[];
+	memberships: boolean;
+	acsUrl: string | null;
+}
+
+export interface CreateRequest {
+	preset: string;
+	owner: string | null;
+	/** Empty lets the server derive it (SAML entity ID, Google Workspace name). */
+	clientId: string;
+	name: string;
+	domain: string;
+	/** Empty lets the server derive it from the domain. */
+	endpoint: string;
+	memberships: boolean;
+	karId: string;
+}
+
+export interface Preview {
+	payload: Record<string, unknown>;
+	clientId: string;
+	domain: string;
+	endpoint: string;
+}
+
+export interface UpdateRequest {
+	name?: string;
+	enabled?: boolean;
+	redirectUris?: string[];
+	postLogoutRedirectUris?: string[];
+	webOrigins?: string[];
+	/** Admins only. Empty string removes the owner. */
+	owner?: string;
 }
 
 export class ApiError extends Error {
@@ -41,112 +92,101 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-	const user = await userManager.getUser();
-	if (!user || user.expired) {
-		throw new ApiError(401, "Not signed in");
-	}
-
-	const url = `${adminBase}${path}`;
 	let response: Response;
 	try {
-		response = await fetch(url, {
+		response = await fetch(`/api${path}`, {
 			...init,
+			credentials: "same-origin",
 			headers: {
 				...init?.headers,
-				Authorization: `Bearer ${user.access_token}`,
+				// Required by the backend on every write: a cross-site page cannot
+				// add it without a CORS preflight, which is never granted.
+				"X-Requested-With": "scoutid-admin",
 				...(init?.body ? { "Content-Type": "application/json" } : {}),
 			},
 		});
 	} catch (cause) {
-		// fetch() rejects (rather than returning a non-ok response) when the
-		// request never completed: CORS rejection, DNS/TLS failure, or the
-		// request being blocked. The browser deliberately hides which.
-		//
-		// The usual cause is CORS: Keycloak's Admin API derives
-		// Access-Control-Allow-Origin from the Web origins of the client that
-		// *issued the token* (the `azp` claim) — not from the URL being called.
-		// So the origin must be listed on this GUI's own client.
 		throw new ApiError(
 			0,
-			`Kunde inte nå ${url} — kontrollera att Web origins på klienten ` +
-				`${config.clientId} innehåller ${window.location.origin} ` +
-				`(${(cause as Error).message})`,
+			`Kunde inte nå servern (${(cause as Error).message}).`,
 		);
 	}
 
+	if (response.status === 401 && path !== "/me") {
+		// The session expired mid-use. Logging in again is silent while the
+		// Keycloak SSO session lives. /me is exempt: App shows a login button.
+		login();
+	}
+
 	if (!response.ok) {
-		// Keycloak reports failures as {error|errorMessage}; fall back to status.
 		let detail = response.statusText;
 		try {
 			const body = await response.json();
-			detail = body.errorMessage ?? body.error ?? detail;
+			// FastAPI reports validation errors as a list of {msg}.
+			detail = Array.isArray(body.detail)
+				? body.detail.map((d: { msg: string }) => d.msg).join("; ")
+				: (body.detail ?? detail);
 		} catch {
 			// Non-JSON error body — keep the status text.
 		}
 		throw new ApiError(response.status, detail);
 	}
 
-	// Writes answer with an empty body: 204 for PUT/DELETE, but 201 with
-	// content-length 0 (and a Location header) for a successful POST /clients.
-	// Parsing that as JSON throws "unexpected end of data", which would report a
-	// successful create as a failure — so key off the body, not the status.
-	const text = await response.text();
-	if (!text) {
+	if (response.status === 204) {
 		return undefined as T;
 	}
-	return JSON.parse(text) as T;
+	return (await response.json()) as T;
 }
 
-export const listClients = () => request<KcClient[]>("/clients");
+const json = (method: string, body: unknown): RequestInit => ({
+	method,
+	body: JSON.stringify(body),
+});
 
-export const getClient = (id: string) => request<KcClient>(`/clients/${id}`);
+export const getMe = () => request<Me>("/me");
 
-export interface KcClientScope {
-	id: string;
-	name: string;
-	description?: string;
-	protocol?: string;
-}
+export const listPresets = () => request<Preset[]>("/presets");
 
-/** All client scopes defined in the realm. */
-export const listClientScopes = () =>
-	request<KcClientScope[]>("/client-scopes");
+export const previewClient = (req: CreateRequest) =>
+	request<Preview>("/clients/preview", json("POST", req));
 
-/** Scopes always applied to this client (as opposed to optional ones). */
-export const getDefaultClientScopes = (id: string) =>
-	request<KcClientScope[]>(`/clients/${id}/default-client-scopes`);
-
-export const addDefaultClientScope = (id: string, scopeId: string) =>
-	request<void>(`/clients/${id}/default-client-scopes/${scopeId}`, {
-		method: "PUT",
-	});
-
-export const removeDefaultClientScope = (id: string, scopeId: string) =>
-	request<void>(`/clients/${id}/default-client-scopes/${scopeId}`, {
-		method: "DELETE",
-	});
-
-/** Look a client up by its clientId (Keycloak's REST id differs from it). */
-export const findClient = async (clientId: string) => {
-	const matches = await request<KcClient[]>(
-		`/clients?clientId=${encodeURIComponent(clientId)}`,
+export const createClient = (req: CreateRequest) =>
+	request<{ id: string; clientId: string; secret: string | null }>(
+		"/clients",
+		json("POST", req),
 	);
-	return matches[0] ?? null;
-};
+
+export const listClients = () => request<ClientSummary[]>("/clients");
+
+export const getClient = (id: string) =>
+	request<ClientDetail>(`/clients/${id}`);
+
+export const updateClient = (id: string, req: UpdateRequest) =>
+	request<ClientDetail>(`/clients/${id}`, json("PUT", req));
+
+export const deleteClient = (id: string) =>
+	request<void>(`/clients/${id}`, { method: "DELETE" });
 
 /**
- * Client secret for a confidential client. Admins need this to configure the
- * far end, and having to leave for the Keycloak console would defeat the point
- * of this GUI.
+ * Client secret for a confidential client. Users need it to configure the far
+ * end, and having to leave for the Keycloak console would defeat the point of
+ * this GUI.
  */
 export const getClientSecret = (id: string) =>
-	request<{ type: string; value: string }>(`/clients/${id}/client-secret`);
+	request<{ value: string }>(`/clients/${id}/secret`);
 
-export const createClient = (client: Partial<KcClient>) =>
-	request<void>("/clients", { method: "POST", body: JSON.stringify(client) });
-
-export const updateClient = (id: string, client: Partial<KcClient>) =>
-	request<void>(`/clients/${id}`, {
-		method: "PUT",
-		body: JSON.stringify(client),
+export const setMemberships = (id: string, on: boolean) =>
+	request<void>(`/clients/${id}/memberships-scope`, {
+		method: on ? "PUT" : "DELETE",
 	});
+
+export const MEMBERSHIP_SCOPE = "scoutnet-memberships";
+
+/** Where a 401 sends the browser: the backend starts the Keycloak login. */
+export const login = () => {
+	window.location.href = "/auth/login";
+};
+
+export const logout = () => {
+	window.location.href = "/auth/logout";
+};

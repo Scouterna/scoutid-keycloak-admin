@@ -1,37 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { type KcClient, listClients } from "../api";
-import { describeClient } from "../presets";
+import { type ClientSummary, listClients, type Me } from "../api";
 
-/**
- * Endpoints to show in the list. SAML clients keep their ACS URL in attributes
- * rather than redirectUris, so read both.
- */
-function endpointsOf(client: KcClient): string[] {
-	const acs = client.attributes?.saml_assertion_consumer_url_post;
-	const uris = client.redirectUris ?? [];
-	return acs && !uris.includes(acs) ? [acs, ...uris] : uris;
-}
-
-/**
- * Clients Keycloak creates for its own use. Hiding them keeps the list to the
- * integrations admins actually manage; the toggle still exposes them.
- */
-const BUILT_IN = new Set([
-	"account",
-	"account-console",
-	"admin-cli",
-	"broker",
-	"realm-management",
-	"security-admin-console",
-]);
-
-export function ClientList() {
-	const [clients, setClients] = useState<KcClient[] | null>(null);
+export function ClientList({ me }: { me: Me }) {
+	const [clients, setClients] = useState<ClientSummary[] | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [idFilter, setIdFilter] = useState("");
 	const [typeFilter, setTypeFilter] = useState("");
+	const [ownerFilter, setOwnerFilter] = useState("");
 	const [urlFilter, setUrlFilter] = useState("");
-	const [showBuiltIn, setShowBuiltIn] = useState(false);
+	const [showProtected, setShowProtected] = useState(false);
 
 	useEffect(() => {
 		listClients()
@@ -43,19 +20,22 @@ export function ClientList() {
 		if (!clients) {
 			return [];
 		}
+		const owner = ownerFilter.trim();
 		return clients
-			.filter((c) => showBuiltIn || !BUILT_IN.has(c.clientId))
+			.filter((c) => showProtected || !c.protected)
 			.filter((c) => c.clientId.toLowerCase().includes(idFilter.toLowerCase()))
-			.filter((c) => !typeFilter || describeClient(c) === typeFilter)
+			.filter((c) => !typeFilter || c.type === typeFilter)
+			.filter((c) =>
+				!owner ? true : owner === "-" ? !c.owner : c.owner === owner,
+			)
 			.filter((c) =>
 				!urlFilter
 					? true
-					: endpointsOf(c).some((u) =>
+					: c.endpoints.some((u) =>
 							u.toLowerCase().includes(urlFilter.toLowerCase()),
 						),
-			)
-			.sort((a, b) => a.clientId.localeCompare(b.clientId));
-	}, [clients, idFilter, typeFilter, urlFilter, showBuiltIn]);
+			);
+	}, [clients, idFilter, typeFilter, ownerFilter, urlFilter, showProtected]);
 
 	if (error) {
 		return (
@@ -68,7 +48,7 @@ export function ClientList() {
 	return (
 		<div>
 			<div className="mb-4 flex items-center justify-between">
-				<h2 className="text-xl font-semibold text-slate-900">OAuth-klienter</h2>
+				<h2 className="text-xl font-semibold text-slate-900">Klienter</h2>
 				<a
 					href="#/clients/add"
 					className="rounded bg-blue-700 px-3 py-2 text-sm font-medium text-white"
@@ -81,6 +61,7 @@ export function ClientList() {
 				<thead>
 					<tr className="border-b border-slate-300 text-left">
 						<th className="p-2">Client ID</th>
+						<th className="p-2">Kår</th>
 						<th className="p-2">Typ</th>
 						<th className="p-2">Redirect-URI:er</th>
 						<th className="p-2" />
@@ -93,6 +74,17 @@ export function ClientList() {
 								value={idFilter}
 								onChange={(e) => setIdFilter(e.target.value)}
 							/>
+						</td>
+						<td className="p-2">
+							{me.isAdmin || Object.keys(me.groups).length > 1 ? (
+								<input
+									className="w-20 rounded border border-slate-300 px-2 py-1"
+									placeholder={me.isAdmin ? "nr / -" : "nr"}
+									title={me.isAdmin ? "- visar klienter utan kår" : undefined}
+									value={ownerFilter}
+									onChange={(e) => setOwnerFilter(e.target.value)}
+								/>
+							) : null}
 						</td>
 						<td className="p-2">
 							<select
@@ -120,8 +112,14 @@ export function ClientList() {
 				<tbody>
 					{clients === null ? (
 						<tr>
-							<td className="p-2 text-slate-500" colSpan={4}>
+							<td className="p-2 text-slate-500" colSpan={5}>
 								Laddar…
+							</td>
+						</tr>
+					) : filtered.length === 0 ? (
+						<tr>
+							<td className="p-2 text-slate-500" colSpan={5}>
+								Inga klienter.
 							</td>
 						</tr>
 					) : (
@@ -138,9 +136,12 @@ export function ClientList() {
 										</span>
 									) : null}
 								</td>
-								<td className="p-2">{describeClient(c)}</td>
+								<td className="p-2" title={c.owner ? me.groups[c.owner] : ""}>
+									{c.owner ?? "—"}
+								</td>
+								<td className="p-2">{c.type}</td>
 								<td className="p-2 break-all text-slate-600">
-									{endpointsOf(c).join(", ") || "—"}
+									{c.endpoints.join(", ") || "—"}
 								</td>
 								<td className="p-2 text-right">
 									<a
@@ -156,14 +157,16 @@ export function ClientList() {
 				</tbody>
 			</table>
 
-			<label className="mt-4 flex items-center gap-2 text-sm text-slate-600">
-				<input
-					type="checkbox"
-					checked={showBuiltIn}
-					onChange={(e) => setShowBuiltIn(e.target.checked)}
-				/>
-				Visa Keycloaks inbyggda klienter
-			</label>
+			{me.isAdmin ? (
+				<label className="mt-4 flex items-center gap-2 text-sm text-slate-600">
+					<input
+						type="checkbox"
+						checked={showProtected}
+						onChange={(e) => setShowProtected(e.target.checked)}
+					/>
+					Visa Keycloaks inbyggda klienter
+				</label>
+			) : null}
 		</div>
 	);
 }

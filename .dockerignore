@@ -1,8 +1,14 @@
 node_modules
 dist
+.venv
 .git
 .github
 k8s
+tests
+scripts
+**/__pycache__
+.pytest_cache
+.ruff_cache
 *.log
 .env
-.env.local
+.env.*
